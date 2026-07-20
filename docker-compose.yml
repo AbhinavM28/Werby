@@ -1,0 +1,13 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      # Persist the vector store outside the container lifecycle
+      - chroma-data:/srv/werby/data/chroma
+    restart: unless-stopped
+
+volumes:
+  chroma-data:

@@ -1,0 +1,38 @@
+[project]
+name = "werby"
+version = "0.1.0"
+description = "AI Engineering Copilot for warehouse and industrial engineers (RAG over engineering documentation)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "python-multipart>=0.0.9",
+    "openai>=1.35",
+    "chromadb>=0.5",
+    "langchain-text-splitters>=0.2",
+    "pypdf>=4.2",
+    "tenacity>=8.3",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+frontend = ["streamlit>=1.35"]
+local = ["sentence-transformers>=3.0"]
+dev = ["pytest>=8.2", "httpx>=0.27", "ruff>=0.4", "mypy>=1.10"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,12 @@
+# Pinned-range runtime deps (see pyproject.toml for the canonical list)
+fastapi>=0.111
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.3
+python-multipart>=0.0.9
+openai>=1.35
+chromadb>=0.5
+langchain-text-splitters>=0.2
+pypdf>=4.2
+tenacity>=8.3
+httpx>=0.27

@@ -1,0 +1,20 @@
+# Environments & secrets
+.env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Data (vector store is derived state — never commit it)
+data/chroma/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store

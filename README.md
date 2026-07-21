@@ -1,3 +1,5 @@
+[![CI](https://github.com/AbhinavM28/Werby/actions/workflows/ci.yml/badge.svg)](https://github.com/AbhinavM28/Werby/actions/workflows/ci.yml)
+
 # 🏗️ Werby — AI Engineering Copilot
 
 **Werby** is a Retrieval-Augmented Generation (RAG) system that lets warehouse and industrial engineers ask natural-language questions against their own engineering documentation — equipment manuals, SOPs, spec sheets, safety procedures — and get grounded, source-cited answers.

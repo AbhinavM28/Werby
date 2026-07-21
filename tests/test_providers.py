@@ -31,7 +31,14 @@ def clean_caches(monkeypatch):
     deps.get_vector_store.cache_clear()
 
 
-def test_openai_provider_without_key_fails_loudly(monkeypatch):
+def test_openai_provider_without_key_fails_loudly(monkeypatch, tmp_path):
+    # Point Settings at an EMPTY .env in a temp dir. Otherwise a developer's
+    # real .env (with a live key) would leak into this test and make the
+    # "missing key" scenario impossible to simulate -- the test would pass in
+    # CI's clean checkout but fail on any machine that has a real key on disk.
+    # This keeps the test hermetic: same result everywhere.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("LLM_PROVIDER", "openai")
     get_settings.cache_clear()

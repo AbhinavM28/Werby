@@ -178,7 +178,7 @@ class ChromaVectorStore(VectorStore):
         distances = result["distances"][0] if result["distances"] else []
 
         retrieved: list[RetrievedChunk] = []
-        for text, meta, distance in zip(documents, metadatas, distances):
+        for text, meta, distance in zip(documents, metadatas, distances, strict=False):
             retrieved.append(
                 RetrievedChunk(
                     text=text,

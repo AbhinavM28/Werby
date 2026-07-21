@@ -6,7 +6,7 @@ Services can evolve internally without breaking API consumers, as long as
 these schemas stay stable (and vice versa).
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
@@ -73,5 +73,5 @@ class HealthResponse(BaseModel):
     version: str
     environment: str
     timestamp: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc)
+        default_factory=lambda: datetime.now(UTC)
     )

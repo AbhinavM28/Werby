@@ -13,8 +13,10 @@ This is the Dependency Inversion Principle in practice: high-level policy
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import chromadb
 
@@ -153,7 +155,10 @@ class ChromaVectorStore(VectorStore):
         try:
             self._collection.upsert(
                 ids=[c.chunk_id for c in chunks],
-                embeddings=embeddings,
+                # chromadb's stub wants list[Sequence[float] | Sequence[int]];
+                # list[list[float]] matches at runtime but list is invariant,
+                # so mypy can't derive that on its own -- cast documents it.
+                embeddings=cast(list[Sequence[float] | Sequence[int]], embeddings),
                 documents=[c.text for c in chunks],
                 metadatas=[c.metadata for c in chunks],
             )
@@ -166,7 +171,9 @@ class ChromaVectorStore(VectorStore):
     ) -> list[RetrievedChunk]:
         try:
             result = self._collection.query(
-                query_embeddings=[query_embedding],
+                query_embeddings=cast(
+                    list[Sequence[float] | Sequence[int]], [query_embedding]
+                ),
                 n_results=top_k,
                 include=["documents", "metadatas", "distances"],
             )
@@ -183,7 +190,13 @@ class ChromaVectorStore(VectorStore):
                 RetrievedChunk(
                     text=text,
                     source_document=str(meta.get("source_document", "unknown")),
-                    chunk_index=int(meta.get("chunk_index", -1)),
+                    # chromadb's Metadata value type is a wide union (it also
+                    # allows lists/SparseVector for filtering elsewhere); we
+                    # know chunk_index round-trips as int|float|str because
+                    # that's all upsert() ever writes into it.
+                    chunk_index=int(
+                        cast(int | float | str, meta.get("chunk_index", -1))
+                    ),
                     # cosine distance in [0, 2] -> similarity in [0, 1]
                     score=round(1.0 - (distance / 2.0), 4),
                 )

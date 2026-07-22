@@ -62,6 +62,12 @@ the app refuses to start on a mismatch. Never weaken this guard.
 
 - **Python 3.11+**, full type hints on function signatures.
 - **Formatting/linting**: ruff. Code must pass `ruff check app tests scripts`.
+- **Type checking**: mypy. Code must pass `mypy app`. This is a real gate (CI
+  enforces it), not aspirational — it exists to catch mismatches at typed
+  boundaries like `VectorStore`/chromadb that ruff cannot (ruff doesn't do
+  type inference). If a third-party stub is wrong or over-wide relative to
+  what we actually pass, use `typing.cast` with a comment explaining why,
+  rather than loosening our own signatures or reaching for `# type: ignore`.
 - **Docstrings**: explain *why*, not just *what*. Module docstrings state the
   module's role in the architecture.
 - **Config**: all settings flow through `app/core/config.py` (pydantic-settings).
@@ -77,8 +83,8 @@ the app refuses to start on a mismatch. Never weaken this guard.
   `fix/pdf-encoding`, `chore/ci-cache`, `docs/architecture`).
 - Conventional Commits: `type(scope): imperative summary`
   (`feat`, `fix`, `chore`, `docs`, `refactor`, `test`).
-- Before proposing a commit, run BOTH gates locally and confirm they pass:
-  `ruff check app tests scripts` and `pytest -q`.
+- Before proposing a commit, run ALL THREE gates locally and confirm they pass:
+  `ruff check app tests scripts`, `mypy app`, and `pytest -q`.
 - Open a PR, self-review the diff in Files Changed, squash-merge, delete branch.
 
 ## Environment
@@ -96,6 +102,7 @@ the app refuses to start on a mismatch. Never weaken this guard.
 - Run frontend: `streamlit run frontend/streamlit_app.py`
 - Test: `pytest -q`
 - Lint: `ruff check app tests scripts`
+- Type check: `mypy app`
 - Bulk ingest: `python -m scripts.ingest ./path/to/docs`
 
 ## Current roadmap (next up first)

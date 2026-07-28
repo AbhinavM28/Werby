@@ -443,29 +443,42 @@ class EvaluationService:
         return EvaluationReport(results=results)
 
     def _run_case(self, case: EvalCase, top_k: int, use_judge: bool) -> CaseResult:
-        # Only pay for an LLM answer when a metric actually needs one -- an
-        # out-of-scope case with no expected_keywords and no judge only needs
-        # retrieval, which is free of LLM cost.
-        needs_answer = bool(case.expected_keywords) or use_judge
-
-        answer: str | None
-        if needs_answer:
-            result = self._rag.query(case.question, top_k=top_k)
-            retrieved, answer = result.sources, result.answer
-        else:
-            retrieved, answer = self._rag.retrieve(case.question, top_k=top_k), None
-
+        # Rank/top_score are always measured against retrieve()'s raw output,
+        # never query()'s -- RAGService.query() now applies a relevance
+        # threshold before generating an answer, and if rank/score came from
+        # it, a case that happens to need an answer (has expected_keywords or
+        # the judge is on) would silently measure *post-filter* retrieval
+        # while every other case still measures *pre-filter* retrieval. That
+        # would make hit-rate depend on an unrelated flag instead of on
+        # retrieval quality, which is the one thing this harness exists to
+        # measure honestly.
+        retrieved = self._rag.retrieve(case.question, top_k=top_k)
         rank = (
             self._rank_of(case.expected_source, retrieved)
             if case.expected_source
             else None
         )
         top_score = retrieved[0].score if retrieved else None
+
+        # Only pay for an LLM answer when a metric actually needs one -- an
+        # out-of-scope case with no expected_keywords and no judge only needs
+        # retrieval, which is free of LLM cost.
+        needs_answer = bool(case.expected_keywords) or use_judge
+        answer: str | None = None
+        answer_context: list[RetrievedChunk] = []
+        if needs_answer:
+            result = self._rag.query(case.question, top_k=top_k)
+            answer, answer_context = result.answer, result.sources
+
         keyword_check = self._check_keywords(case.expected_keywords, answer)
 
         faithfulness = None
         if use_judge and answer is not None:
-            context = build_context(retrieved, max_chars=self._max_context_chars)
+            # Judge against exactly what the LLM saw (post-filter), not the
+            # raw retrieval above -- otherwise a chunk the threshold filtered
+            # out could make a correct refusal look "unfaithful" to context
+            # the model never actually used.
+            context = build_context(answer_context, max_chars=self._max_context_chars)
             faithfulness = self._judge.judge(case.question, context, answer)
 
         return CaseResult(

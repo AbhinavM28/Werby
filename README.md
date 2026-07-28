@@ -6,6 +6,8 @@
 
 Ask *"What is the rated load of the AS/RS crane?"* and Werby retrieves the relevant passages from your ingested manuals, feeds them to an LLM under strict grounding rules, and returns the answer **with citations to the exact chunks it used** — because in an industrial setting, a hallucinated torque spec is a safety incident, not a bug.
 
+> **Status:** actively developed, pre-deployment. The RAG pipeline, provider abstraction, CI quality gates, and evaluation harness are complete and tested — see [Evaluation](#evaluation) for real measured numbers and [Roadmap](#roadmap) for what's next. A hosted demo and walkthrough recording will follow deployment.
+
 ## How RAG works here
 
 ```
@@ -33,12 +35,16 @@ werby/
 │   ├── schemas/rag.py              # Pydantic API contracts
 │   └── services/
 │       ├── document_processor.py   # Text extraction + semantic chunking (pure)
-│       ├── embedding_service.py    # OpenAI embeddings (batched, retried)
 │       ├── vector_store.py         # VectorStore ABC + ChromaDB implementation
 │       ├── llm_service.py          # Prompt engineering + generation
-│       └── rag_service.py          # Ingestion & RAG orchestration
+│       ├── rag_service.py          # Ingestion & RAG orchestration
+│       ├── evaluation.py           # Retrieval hit-rate / faithfulness harness
+│       └── providers/              # LLMProvider & EmbeddingProvider ABCs + OpenAI, Ollama, local impls
 ├── frontend/streamlit_app.py       # Pure HTTP client UI (swappable for React)
-├── scripts/ingest.py               # Bulk CLI ingestion (reuses same services)
+├── scripts/
+│   ├── ingest.py                   # Bulk CLI ingestion (reuses IngestionService)
+│   └── evaluate.py                 # CLI for the evaluation harness
+├── data/eval/dataset.yaml          # Hand-curated evaluation question set
 ├── tests/                          # Unit tests (mocked externals, no network)
 ├── Dockerfile                      # Multi-stage, non-root, healthchecked
 ├── docker-compose.yml
@@ -107,6 +113,33 @@ make lint       # ruff + mypy
 make format
 ```
 
+## Evaluation
+
+Unit tests prove the code behaves correctly against mocks. A separate `EvaluationService` measures whether the *system* actually retrieves the right thing and answers faithfully, run against the real vector store and a real LLM:
+
+- **Retrieval hit-rate** — does the expected source document appear in the top-k results, and at what rank.
+- **Score distribution** — the top similarity score per question, split between in-scope questions (a correct source exists) and a deliberately out-of-scope one, to establish where a future relevance threshold would sit.
+- **Faithfulness** — a free, deterministic keyword check, plus an optional LLM-judge that flags answer claims unsupported by the retrieved context. The judge produces two signals (a list of unsupported claims, and a summary `yes`/`no`); when they disagree with each other, that's recorded as its own **inconsistent** outcome instead of being silently resolved one way or the other.
+
+Latest run, against the current sample corpus (OSHA 1910.178 + a sample AS/RS crane spec, 63 chunks, 7 hand-curated questions):
+
+| Metric | Result |
+|---|---|
+| Hit-rate | **100%** (6/6 in-scope questions) |
+| Mean in-scope score | 0.8475 |
+| Mean out-of-scope score | 0.5469 |
+| Score gap (in − out) | 0.3006 |
+| Keyword pass-rate | 66.7% |
+| Faithfulness pass-rate | 85.7% |
+| Faithfulness inconsistent | 1 case |
+
+```bash
+python -m scripts.evaluate data/eval/dataset.yaml
+python -m scripts.evaluate data/eval/dataset.yaml --skip-judge   # skip the LLM-judge call and its cost
+```
+
+Reported honestly, not oversold: 7 questions is enough to validate the harness itself and catch real issues — it already caught a live case of the judge contradicting itself, which is the one "inconsistent" result above — but it isn't yet a statistically meaningful faithfulness benchmark. Growing the dataset alongside the ingested corpus is on the roadmap.
+
 ## Configuration
 
 All settings load from environment variables / `.env` and are validated at startup — see `app/core/config.py` for every knob (models, chunk size, top-k, paths). Secrets never live in code.
@@ -114,12 +147,15 @@ All settings load from environment variables / `.env` and are validated at start
 ## Roadmap
 
 - [x] Pluggable LLM/embedding providers — OpenAI, Ollama (fully local / air-gapped), sentence-transformers
+- [x] CI-enforced quality gates — ruff, mypy, and a hermetic pytest suite required on every PR
+- [x] Evaluation harness — retrieval hit-rate, in-scope/out-of-scope score gap, keyword + LLM-judge faithfulness (see [Evaluation](#evaluation))
+- [ ] Grow the evaluation dataset alongside the ingested corpus
 - [ ] Hybrid retrieval (BM25 + dense) and a reranking stage
 - [ ] pgvector backend behind the existing `VectorStore` interface
 - [ ] Conversation memory / multi-turn queries
-- [ ] Evaluation harness (retrieval hit-rate, answer faithfulness)
 - [ ] Auth + multi-tenant corpora
 - [ ] React frontend against the same API
+- [ ] Deploy and record a live demo
 
 ## License
 

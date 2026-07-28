@@ -1,0 +1,56 @@
+# Werby evaluation dataset.
+#
+# Each entry is one test case for `python -m scripts.evaluate`. `expected_source`
+# must match the exact filename VectorStore stored during ingestion (the literal
+# filename passed to IngestionService.ingest()) -- these values match the corpus
+# currently in data/chroma: OSHA-2011-0062-0014_content.pdf and
+# sample_crane_spec.md. Re-check these if you re-ingest under different names.
+#
+# expected_source: null marks a case as deliberately out-of-scope -- no
+# source is expected to be found, and it's excluded from hit-rate, but its
+# top retrieval score still feeds the in-scope/out-of-scope score gap.
+
+- id: pit-daily-inspection
+  question: "What must an operator check before operating a powered industrial truck each shift?"
+  expected_source: "OSHA-2011-0062-0014_content.pdf"
+  expected_keywords: ["inspection", "brakes", "shift"]
+  notes: "Core pre-operation requirement, 1910.178(q)(7)."
+
+- id: pit-operator-training
+  question: "What training must an employee complete before operating a powered industrial truck?"
+  expected_source: "OSHA-2011-0062-0014_content.pdf"
+  expected_keywords: ["training", "certif"]
+  notes: "Operator training and evaluation requirement, 1910.178(l)."
+
+- id: pit-out-of-service
+  question: "Under what conditions must a powered industrial truck be immediately removed from service?"
+  expected_source: "OSHA-2011-0062-0014_content.pdf"
+  expected_keywords: ["removed", "service"]
+  notes: "Out-of-service triggers (e.g. leaking LP gas), 1910.178(q)."
+
+- id: crane-rated-load
+  question: "What is the maximum rated load for the SRM-4000 stacker crane?"
+  expected_source: "sample_crane_spec.md"
+  expected_keywords: ["1500", "rated load"]
+  notes: "Direct spec lookup -- the exact class of question Werby exists to answer fast."
+
+- id: crane-lockout-tagout
+  question: "What is the lockout/tagout procedure before performing maintenance on the crane?"
+  expected_source: "sample_crane_spec.md"
+  expected_keywords: ["lockout", "padlock", "disconnect"]
+  notes: "Safety-critical procedure, section 6 -- wrong steps here are a real hazard, not a UX bug."
+
+- id: crane-hoist-chain-inspection
+  question: "What is the inspection interval for the hoist chain?"
+  expected_source: "sample_crane_spec.md"
+  expected_keywords: ["hoist chain", "monthly"]
+  notes: "Maintenance-schedule lookup, distinct phrasing from the daily-inspection PIT case."
+
+- id: out-of-scope-baseline
+  question: "What's a good recipe for sourdough bread?"
+  expected_source: null
+  notes: >
+    Deliberately unrelated to any ingested document. Its top score is the
+    reference point for a future relevance threshold -- a real question
+    scoring near this would mean retrieval is failing, not that the corpus
+    simply lacks the answer.

@@ -104,10 +104,11 @@ the app refuses to start on a mismatch. Never weaken this guard.
 - Lint: `ruff check app tests scripts`
 - Type check: `mypy app`
 - Bulk ingest: `python -m scripts.ingest ./path/to/docs`
+- Evaluate: `python -m scripts.evaluate data/eval/dataset.yaml` (add `--skip-judge`
+  to skip the LLM faithfulness check and its cost)
 
 ## Current roadmap (next up first)
 
-1. Evaluation harness — measure retrieval hit-rate and answer faithfulness.
-2. Hybrid retrieval (BM25 + dense) and a reranking stage.
-3. pgvector backend behind the existing VectorStore interface.
-4. Conversation memory / multi-turn queries.
+1. Hybrid retrieval (BM25 + dense) and a reranking stage.
+2. pgvector backend behind the existing VectorStore interface.
+3. Conversation memory / multi-turn queries.

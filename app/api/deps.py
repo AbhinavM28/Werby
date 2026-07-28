@@ -21,6 +21,11 @@ from functools import lru_cache
 from app.core.config import Settings, get_settings
 from app.core.exceptions import ConfigurationError
 from app.services.document_processor import DocumentProcessor
+from app.services.evaluation import (
+    EvaluationService,
+    FaithfulnessJudge,
+    LLMFaithfulnessJudge,
+)
 from app.services.llm_service import LLMService
 from app.services.providers.base import EmbeddingProvider, LLMProvider
 from app.services.rag_service import IngestionService, RAGService
@@ -133,6 +138,20 @@ def get_rag_service() -> RAGService:
         embeddings=get_embedding_provider(),
         store=get_vector_store(),
         llm=get_llm_service(),
+        default_top_k=settings.retrieval_top_k,
+        max_context_chars=settings.max_context_chars,
+    )
+
+
+def get_faithfulness_judge() -> FaithfulnessJudge:
+    return LLMFaithfulnessJudge(provider=get_llm_provider())
+
+
+def get_evaluation_service() -> EvaluationService:
+    settings = get_settings()
+    return EvaluationService(
+        rag=get_rag_service(),
+        judge=get_faithfulness_judge(),
         default_top_k=settings.retrieval_top_k,
         max_context_chars=settings.max_context_chars,
     )

@@ -38,3 +38,8 @@ class LLMServiceError(WerbyError):
 
 class EmptyCorpusError(WerbyError):
     """Raised when a query is made but no documents have been ingested."""
+
+
+class EvaluationDatasetError(WerbyError):
+    """Raised when an evaluation dataset file is missing, malformed, or
+    fails schema validation."""

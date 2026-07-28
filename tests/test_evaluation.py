@@ -17,6 +17,7 @@ from app.services.evaluation import (
     EvaluationService,
     FaithfulnessJudge,
     FaithfulnessResult,
+    FaithfulnessVerdict,
     LLMFaithfulnessJudge,
     format_report,
     load_dataset,
@@ -85,7 +86,9 @@ def llm() -> MagicMock:
     return mock
 
 
-PASSING = FaithfulnessResult(faithful=True, unsupported_claims=[], rationale="ok")
+PASSING = FaithfulnessResult(
+    verdict=FaithfulnessVerdict.FAITHFUL, unsupported_claims=[], rationale="ok"
+)
 
 
 @pytest.fixture
@@ -303,19 +306,21 @@ def test_answer_generated_when_keywords_present(embeddings, llm, judge) -> None:
 
 
 def test_faithfulness_populated_when_judge_used(embeddings, llm) -> None:
-    judge = FakeJudge(FaithfulnessResult(True, [], "grounded"))
+    verdict = FaithfulnessResult(FaithfulnessVerdict.FAITHFUL, [], "grounded")
+    judge = FakeJudge(verdict)
     service = make_service(embeddings, llm, judge)
     case = EvalCase(id="hit", question=HIT_Q, expected_source="crane_spec.pdf")
 
     report = service.run([case], use_judge=True)
 
-    assert report.results[0].faithfulness == FaithfulnessResult(True, [], "grounded")
+    assert report.results[0].faithfulness == verdict
     assert judge.calls == [HIT_Q]
     assert report.faithfulness_pass_rate == 100.0
+    assert report.faithfulness_inconsistent_count == 0
 
 
 def test_faithfulness_none_when_judge_skipped(embeddings, llm) -> None:
-    judge = FakeJudge(FaithfulnessResult(True, [], "grounded"))
+    judge = FakeJudge(FaithfulnessResult(FaithfulnessVerdict.FAITHFUL, [], "grounded"))
     service = make_service(embeddings, llm, judge)
     case = EvalCase(id="hit", question=HIT_Q, expected_source="crane_spec.pdf")
 
@@ -324,9 +329,38 @@ def test_faithfulness_none_when_judge_skipped(embeddings, llm) -> None:
     assert report.results[0].faithfulness is None
     assert judge.calls == []
     assert report.faithfulness_pass_rate is None
+    assert report.faithfulness_inconsistent_count is None
 
 
-def test_llm_judge_parses_well_formed_response() -> None:
+def test_aggregate_counts_inconsistent_verdicts_separately(embeddings, llm) -> None:
+    """End-to-end through EvaluationService.run(): an inconsistent verdict
+    shows up in its own count, not silently folded into the pass-rate."""
+    verdicts = {
+        HIT_Q: FaithfulnessResult(FaithfulnessVerdict.FAITHFUL, [], "ok"),
+        MISS_Q: FaithfulnessResult(
+            FaithfulnessVerdict.INCONSISTENT, [], "self-contradictory"
+        ),
+    }
+
+    class SequencedJudge(FaithfulnessJudge):
+        def judge(self, question: str, context: str, answer: str) -> FaithfulnessResult:
+            return verdicts[question]
+
+    service = make_service(embeddings, llm, SequencedJudge())
+    cases = [
+        EvalCase(id="a", question=HIT_Q, expected_source="crane_spec.pdf"),
+        EvalCase(id="b", question=MISS_Q, expected_source="crane_spec.pdf"),
+    ]
+
+    report = service.run(cases, use_judge=True)
+
+    # 1 clean pass / 2 judged -- the inconsistent case is not a pass, but it
+    # also isn't hidden: it shows up in its own count below.
+    assert report.faithfulness_pass_rate == 50.0
+    assert report.faithfulness_inconsistent_count == 1
+
+
+def test_llm_judge_agreement_produces_unfaithful_verdict() -> None:
     provider = MagicMock()
     provider.generate.return_value = (
         "FAITHFUL: no\nUNSUPPORTED: 3000 kg rating\nRATIONALE: not in context\n"
@@ -335,9 +369,60 @@ def test_llm_judge_parses_well_formed_response() -> None:
 
     result = judge.judge("q", "context", "answer")
 
-    assert result.faithful is False
+    assert result.verdict is FaithfulnessVerdict.UNFAITHFUL
     assert result.unsupported_claims == ["3000 kg rating"]
     assert result.rationale == "not in context"
+
+
+def test_llm_judge_agreement_produces_faithful_verdict() -> None:
+    provider = MagicMock()
+    provider.generate.return_value = (
+        "FAITHFUL: yes\nUNSUPPORTED: none\nRATIONALE: fully grounded\n"
+    )
+    judge = LLMFaithfulnessJudge(provider=provider)
+
+    result = judge.judge("q", "context", "answer")
+
+    assert result.verdict is FaithfulnessVerdict.FAITHFUL
+    assert result.unsupported_claims == []
+
+
+def test_llm_judge_flags_contradictory_response_as_inconsistent() -> None:
+    """The real bug we hit: FAITHFUL says no, but the claims list -- the
+    more reliable signal -- says there's nothing unsupported, and the
+    rationale reads as an endorsement. Neither signal alone is trustworthy
+    here, so this must come back INCONSISTENT, not silently pass or fail."""
+    provider = MagicMock()
+    provider.generate.return_value = (
+        "FAITHFUL: no  \n"
+        "UNSUPPORTED: none  \n"
+        "RATIONALE: The answer accurately reflects the conditions under which "
+        "a powered industrial truck must be removed from service as stated "
+        "in the provided documentation."
+    )
+    judge = LLMFaithfulnessJudge(provider=provider)
+
+    result = judge.judge("q", "context", "answer")
+
+    assert result.verdict is FaithfulnessVerdict.INCONSISTENT
+    assert result.unsupported_claims == []
+    assert "accurately reflects" in result.rationale
+
+
+def test_llm_judge_flags_reverse_contradiction_as_inconsistent() -> None:
+    """The other direction of disagreement: FAITHFUL says yes, but the
+    claims list isn't actually empty. Confirms INCONSISTENT triggers on
+    disagreement in general, not just the one direction we happened to hit."""
+    provider = MagicMock()
+    provider.generate.return_value = (
+        "FAITHFUL: yes\nUNSUPPORTED: made-up torque spec\nRATIONALE: looks fine\n"
+    )
+    judge = LLMFaithfulnessJudge(provider=provider)
+
+    result = judge.judge("q", "context", "answer")
+
+    assert result.verdict is FaithfulnessVerdict.INCONSISTENT
+    assert result.unsupported_claims == ["made-up torque spec"]
 
 
 def test_llm_judge_handles_malformed_response_gracefully() -> None:
@@ -347,7 +432,7 @@ def test_llm_judge_handles_malformed_response_gracefully() -> None:
 
     result = judge.judge("q", "context", "answer")
 
-    assert result.faithful is False
+    assert result.verdict is FaithfulnessVerdict.UNFAITHFUL
     assert "Could not parse" in result.rationale
 
 

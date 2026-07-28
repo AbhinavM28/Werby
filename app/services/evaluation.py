@@ -22,12 +22,25 @@ Three metrics, three different costs:
   skips it) and injected through ``FaithfulnessJudge`` -- an ABC mirroring
   ``LLMProvider`` -- so unit tests supply a fake judge and never touch a
   network, while ``scripts/evaluate.py`` wires a real one.
+
+The judge is asked for two structured signals: a list of unsupported claims,
+and a summary ``FAITHFUL: yes/no`` field. The claims list is treated as the
+more reliable one, because it's what the model is actually asked to
+*produce* -- concrete, individually-checkable items -- while the yes/no field
+is a self-reported summary layered on top of that work, and self-reported
+summaries are exactly where a model tends to drift from its own evidence. We
+hit this for real: a judge response with ``FAITHFUL: no``, an empty
+unsupported-claims list, and a rationale that read as an endorsement. Rather
+than trust either signal blindly, a disagreement between them becomes its
+own ``INCONSISTENT`` verdict -- visible in the report as its own count --
+instead of being silently resolved one way or the other.
 """
 
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 import yaml
@@ -120,11 +133,32 @@ class KeywordCheck:
         return len(self.matched) == len(self.expected)
 
 
+class FaithfulnessVerdict(Enum):
+    """Outcome of judging one answer against its retrieved context.
+
+    A plain bool can't represent "the judge's own signals disagreed" without
+    silently picking a side -- INCONSISTENT exists so that disagreement stays
+    a visible, distinct outcome instead of being folded into faithful or
+    unfaithful by default.
+    """
+
+    FAITHFUL = "faithful"
+    UNFAITHFUL = "unfaithful"
+    INCONSISTENT = "inconsistent"
+
+
+_VERDICT_LABELS: dict[FaithfulnessVerdict, str] = {
+    FaithfulnessVerdict.FAITHFUL: "yes",
+    FaithfulnessVerdict.UNFAITHFUL: "no",
+    FaithfulnessVerdict.INCONSISTENT: "inconsistent",
+}
+
+
 @dataclass(frozen=True)
 class FaithfulnessResult:
     """Verdict from a ``FaithfulnessJudge``."""
 
-    faithful: bool
+    verdict: FaithfulnessVerdict
     unsupported_claims: list[str]
     rationale: str
 
@@ -174,12 +208,20 @@ class LLMFaithfulnessJudge(FaithfulnessJudge):
 
     @staticmethod
     def _parse(raw: str) -> FaithfulnessResult:
-        """Parse the judge's fixed-format response.
+        """Parse the judge's fixed-format response into a verdict.
 
         The judge is an LLM producing free text at a system boundary we
         don't control -- malformed output must not crash the eval run, so a
-        parse failure degrades to a conservative "not faithful" verdict with
-        the raw text preserved for a human to read, rather than raising.
+        total parse failure (no usable FAITHFUL field at all) degrades to a
+        conservative UNFAITHFUL verdict with the raw text preserved, rather
+        than raising.
+
+        When the response *does* parse, the unsupported-claims list is
+        treated as the primary signal and FAITHFUL yes/no as a cross-check,
+        not the other way around -- see the module docstring for why. If the
+        two disagree (e.g. FAITHFUL: no but zero unsupported claims listed),
+        neither is trustworthy alone, so the case is recorded as
+        INCONSISTENT instead of silently picking one side.
         """
         fields: dict[str, str] = {}
         for line in raw.splitlines():
@@ -188,27 +230,50 @@ class LLMFaithfulnessJudge(FaithfulnessJudge):
             key, _, value = line.partition(":")
             fields[key.strip().upper()] = value.strip()
 
-        faithful_raw = fields.get("FAITHFUL", "").lower()
-        if faithful_raw not in ("yes", "no"):
+        rationale = fields.get("RATIONALE", "")
+        faithful_field = fields.get("FAITHFUL", "").strip().lower()
+
+        if "UNSUPPORTED" not in fields or faithful_field not in ("yes", "no"):
+            # Total parse failure: there's no second signal to disagree with,
+            # just a response that didn't follow the format -- a different
+            # failure mode than a genuine disagreement between two real
+            # signals, so it stays UNFAITHFUL rather than INCONSISTENT.
             logger.warning(
-                "Unparseable judge response, treating as not faithful: %.200s", raw
+                "Unparseable judge response, treating as unfaithful: %.200s", raw
             )
+            fallback = f"Could not parse judge response: {raw.strip()[:200]}"
             return FaithfulnessResult(
-                faithful=False,
+                verdict=FaithfulnessVerdict.UNFAITHFUL,
                 unsupported_claims=[],
-                rationale=f"Could not parse judge response: {raw.strip()[:200]}",
+                rationale=rationale or fallback,
             )
 
-        unsupported_raw = fields.get("UNSUPPORTED", "none")
+        unsupported_raw = fields["UNSUPPORTED"]
         unsupported = (
             []
             if unsupported_raw.strip().lower() == "none"
             else [c.strip() for c in unsupported_raw.split(",") if c.strip()]
         )
+
+        claims_say_faithful = not unsupported
+        field_says_faithful = faithful_field == "yes"
+
+        if claims_say_faithful == field_says_faithful:
+            verdict = (
+                FaithfulnessVerdict.FAITHFUL
+                if claims_say_faithful
+                else FaithfulnessVerdict.UNFAITHFUL
+            )
+        else:
+            verdict = FaithfulnessVerdict.INCONSISTENT
+            logger.warning(
+                "Judge gave contradictory signals (FAITHFUL: %s, unsupported "
+                "claims: %s) -- recording as inconsistent: %.200s",
+                faithful_field, unsupported or "none", raw,
+            )
+
         return FaithfulnessResult(
-            faithful=faithful_raw == "yes",
-            unsupported_claims=unsupported,
-            rationale=fields.get("RATIONALE", ""),
+            verdict=verdict, unsupported_claims=unsupported, rationale=rationale
         )
 
 
@@ -301,11 +366,42 @@ class EvaluationReport:
 
     @property
     def faithfulness_pass_rate(self) -> float | None:
+        """Percentage of judged cases with a clean FAITHFUL verdict.
+
+        Inconsistent cases count toward the denominator (they were judged)
+        but not the numerator (an inconsistent verdict is not a pass) -- the
+        same treatment an unfaithful verdict gets for this specific metric.
+        See ``faithfulness_inconsistent_count`` for how many of those
+        "not a pass" cases were inconsistent rather than genuinely unfaithful.
+        """
         judged = [r for r in self.results if r.faithfulness is not None]
         if not judged:
             return None
-        passed = sum(1 for r in judged if r.faithfulness and r.faithfulness.faithful)
+        passed = sum(
+            1
+            for r in judged
+            if r.faithfulness and r.faithfulness.verdict is FaithfulnessVerdict.FAITHFUL
+        )
         return round(passed / len(judged) * 100, 2)
+
+    @property
+    def faithfulness_inconsistent_count(self) -> int | None:
+        """Count of judged cases where the judge's own signals disagreed.
+
+        Surfaced separately from the pass-rate so a disagreement stays
+        visible instead of being silently counted as a pass or a fail --
+        it's a comment on judge reliability for that case, not a verdict on
+        the answer itself. None (not 0) when nothing was judged.
+        """
+        judged = [r for r in self.results if r.faithfulness is not None]
+        if not judged:
+            return None
+        return sum(
+            1
+            for r in judged
+            if r.faithfulness
+            and r.faithfulness.verdict is FaithfulnessVerdict.INCONSISTENT
+        )
 
 
 class EvaluationService:
@@ -433,11 +529,9 @@ def format_report(report: EvaluationReport) -> str:
             if r.keyword_check.passed is None
             else f"{len(r.keyword_check.matched)}/{len(r.keyword_check.expected)}"
         )
-        faithful = (
-            "n/a"
-            if r.faithfulness is None
-            else ("yes" if r.faithfulness.faithful else "no")
-        )
+        faithful = "n/a"
+        if r.faithfulness is not None:
+            faithful = _VERDICT_LABELS[r.faithfulness.verdict]
         lines.append(
             f"[{status}] {r.case.id:<28} score={score}  "
             f"keywords={kw}  faithful={faithful}"
@@ -462,5 +556,9 @@ def format_report(report: EvaluationReport) -> str:
     lines.append(f"Score gap (in - out):     {fmt_score(report.score_gap)}")
     lines.append(f"Keyword pass-rate:        {fmt_pct(report.keyword_pass_rate)}")
     lines.append(f"Faithfulness pass-rate:   {fmt_pct(report.faithfulness_pass_rate)}")
+
+    inconsistent = report.faithfulness_inconsistent_count
+    inconsistent_text = "n/a" if inconsistent is None else str(inconsistent)
+    lines.append(f"Faithfulness inconsistent: {inconsistent_text}")
 
     return "\n".join(lines)

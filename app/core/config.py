@@ -72,7 +72,18 @@ class Settings(BaseSettings):
 
     # --- Retrieval ---
     retrieval_top_k: int = 5
-    max_context_chars: int = 12_000  # hard cap on prompt context size
+    max_context_chars: int = 12_000
+    # Minimum similarity score (see RetrievedChunk.score, [0, 1]) a chunk must
+    # clear to be used as context. Below this, RAGService.query() refuses to
+    # answer rather than generate from irrelevant context -- a wrong industrial
+    # spec is worse than an honest "I don't know". 0.35 is a deliberately
+    # provisional floor: the eval harness measured in-scope questions
+    # averaging 0.85 and one out-of-scope question at 0.55, so this default
+    # won't filter anything from what's been measured so far. Tune it upward
+    # with `python -m scripts.evaluate` once a wider score distribution
+    # (including near-miss, not just obviously-unrelated, questions) is
+    # available -- see README's Evaluation section.
+    relevance_threshold: float = 0.35  # hard cap on prompt context size
 
     @property
     def is_production(self) -> bool:

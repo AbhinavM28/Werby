@@ -10,7 +10,7 @@ import pytest
 
 from app.core.exceptions import EmptyCorpusError
 from app.services.document_processor import DocumentChunk
-from app.services.rag_service import RAGService
+from app.services.rag_service import NO_RELEVANT_CONTEXT_MESSAGE, RAGService
 from app.services.vector_store import RetrievedChunk, VectorStore
 
 
@@ -77,3 +77,47 @@ def test_top_k_override_limits_retrieval(embeddings, llm) -> None:
     service = RAGService(embeddings, store, llm, default_top_k=5)
     result = service.query("q", top_k=2)
     assert len(result.sources) == 2
+
+
+def test_query_keeps_chunks_above_threshold(embeddings, llm) -> None:
+    store = FakeVectorStore(
+        [RetrievedChunk("load: 2000 kg", "crane.pdf", 0, 0.62)]
+    )
+    service = RAGService(embeddings, store, llm, relevance_threshold=0.5)
+
+    result = service.query("What is the rated load?")
+
+    assert result.sufficient_context is True
+    assert result.sources[0].score == 0.62
+    assert "2000 kg" in result.answer
+    llm.generate_answer.assert_called_once()
+
+
+def test_query_refuses_when_all_chunks_below_threshold(embeddings, llm) -> None:
+    store = FakeVectorStore(
+        [
+            RetrievedChunk("unrelated", "doc.pdf", 0, 0.41),
+            RetrievedChunk("also unrelated", "doc.pdf", 1, 0.30),
+        ]
+    )
+    service = RAGService(embeddings, store, llm, relevance_threshold=0.5)
+
+    result = service.query("What is the rated load?")
+
+    assert result.sufficient_context is False
+    assert result.sources == []
+    assert result.answer == NO_RELEVANT_CONTEXT_MESSAGE
+    llm.generate_answer.assert_not_called()
+
+
+def test_query_boundary_score_equal_to_threshold_passes(embeddings, llm) -> None:
+    """The bar is inclusive: a chunk scoring exactly at the threshold
+    clears it, rather than being discarded by a strict '>' comparison."""
+    store = FakeVectorStore([RetrievedChunk("exact match", "doc.pdf", 0, 0.5)])
+    service = RAGService(embeddings, store, llm, relevance_threshold=0.5)
+
+    result = service.query("q")
+
+    assert result.sufficient_context is True
+    assert len(result.sources) == 1
+    llm.generate_answer.assert_called_once()

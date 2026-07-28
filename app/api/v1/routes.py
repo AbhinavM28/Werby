@@ -119,4 +119,5 @@ def query(
         model=result.model,
         retrieved_chunks=len(result.sources),
         latency_ms=result.latency_ms,
+        sufficient_context=result.sufficient_context,
     )

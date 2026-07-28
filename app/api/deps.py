@@ -140,6 +140,7 @@ def get_rag_service() -> RAGService:
         llm=get_llm_service(),
         default_top_k=settings.retrieval_top_k,
         max_context_chars=settings.max_context_chars,
+        relevance_threshold=settings.relevance_threshold,
     )
 
 

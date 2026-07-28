@@ -28,6 +28,12 @@ from app.services.vector_store import RetrievedChunk, VectorStore
 
 logger = logging.getLogger(__name__)
 
+NO_RELEVANT_CONTEXT_MESSAGE = (
+    "No documentation in the corpus is relevant enough to answer this "
+    "question with confidence. Try rephrasing, or ingest documentation "
+    "that covers this topic."
+)
+
 
 @dataclass(frozen=True)
 class IngestionResult:
@@ -42,6 +48,7 @@ class RAGAnswer:
     sources: list[RetrievedChunk]
     model: str
     latency_ms: int
+    sufficient_context: bool
 
 
 class IngestionService:
@@ -84,12 +91,14 @@ class RAGService:
         llm: LLMService,
         default_top_k: int = 5,
         max_context_chars: int = 12_000,
+        relevance_threshold: float = 0.35,
     ) -> None:
         self._embeddings = embeddings
         self._store = store
         self._llm = llm
         self._default_top_k = default_top_k
         self._max_context_chars = max_context_chars
+        self._relevance_threshold = relevance_threshold
 
     def retrieve(self, question: str, top_k: int | None = None) -> list[RetrievedChunk]:
         """The read path's retrieval step, isolated from generation.
@@ -115,8 +124,34 @@ class RAGService:
         )
         return retrieved
 
+    def _filter_by_relevance(
+        self, chunks: list[RetrievedChunk]
+    ) -> list[RetrievedChunk]:
+        """Discard chunks scoring below the configured relevance threshold.
+
+        Kept as a separate step from ``retrieve`` (see that method's
+        docstring) so the raw retrieval measurement callers like the
+        evaluation harness depend on stays untouched by this business-logic
+        cutoff. A chunk scoring exactly at the threshold passes -- the bar is
+        inclusive, not exclusive.
+        """
+        survivors = [c for c in chunks if c.score >= self._relevance_threshold]
+        if len(survivors) < len(chunks):
+            logger.info(
+                "Filtered %d of %d retrieved chunks below relevance "
+                "threshold %.2f",
+                len(chunks) - len(survivors), len(chunks), self._relevance_threshold,
+            )
+        return survivors
+
     def query(self, question: str, top_k: int | None = None) -> RAGAnswer:
         """Run the full retrieve-then-generate pipeline.
+
+        Chunks below ``relevance_threshold`` are discarded before context is
+        built. If none survive, this returns a refusal instead of calling the
+        LLM: in an industrial safety context, a wrong answer generated from
+        irrelevant context is worse than an honest "I don't know", and
+        skipping the call also saves its cost and latency outright.
 
         Raises:
             EmptyCorpusError: If no documents have been ingested yet.
@@ -124,15 +159,32 @@ class RAGService:
         started = time.perf_counter()
 
         retrieved = self.retrieve(question, top_k)
+        relevant = self._filter_by_relevance(retrieved)
 
-        context = build_context(retrieved, max_chars=self._max_context_chars)
+        if not relevant:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            logger.info(
+                "No chunks cleared the relevance threshold (%.2f) for "
+                "question: %.80s",
+                self._relevance_threshold, question,
+            )
+            return RAGAnswer(
+                answer=NO_RELEVANT_CONTEXT_MESSAGE,
+                sources=[],
+                model=self._llm.model,
+                latency_ms=latency_ms,
+                sufficient_context=False,
+            )
+
+        context = build_context(relevant, max_chars=self._max_context_chars)
         answer = self._llm.generate_answer(question, context)
 
         latency_ms = int((time.perf_counter() - started) * 1000)
         logger.info("Answered in %d ms using %s", latency_ms, self._llm.model)
         return RAGAnswer(
             answer=answer,
-            sources=retrieved,
+            sources=relevant,
             model=self._llm.model,
             latency_ms=latency_ms,
+            sufficient_context=True,
         )

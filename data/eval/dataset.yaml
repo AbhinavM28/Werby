@@ -3,12 +3,31 @@
 # Each entry is one test case for `python -m scripts.evaluate`. `expected_source`
 # must match the exact filename VectorStore stored during ingestion (the literal
 # filename passed to IngestionService.ingest()) -- these values match the corpus
-# currently in data/chroma: OSHA-2011-0062-0014_content.pdf and
-# sample_crane_spec.md. Re-check these if you re-ingest under different names.
+# currently in data/chroma. Re-check these if you re-ingest under different names.
 #
 # expected_source: null marks a case as deliberately out-of-scope -- no
 # source is expected to be found, and it's excluded from hit-rate, but its
 # top retrieval score still feeds the in-scope/out-of-scope score gap.
+#
+# Grown 2026-07-28 for a stress test against a larger, more diverse corpus
+# (added: 1910.147 lockout/tagout, 1910.157 portable fire extinguishers,
+# 1910.212 machine guarding, and a Grundfos SCALA2 pump manual). Three
+# sections below, in order:
+#   1. In-scope, deeper -- straightforward questions against the new docs,
+#      testing whether hit-rate holds as the corpus grows.
+#   2. Cross-document near-misses -- the important ones. Topics (lockout,
+#      training, inspection intervals, leaks) that appear in *multiple*
+#      documents, phrased so retrieval must pick the one correct source
+#      among genuinely similar candidates, not just "a relevant chunk".
+#   3. True out-of-scope -- nothing in the corpus answers these. A mix of
+#      totally alien topics and one OSHA-flavored-but-not-ingested question,
+#      to see whether topical similarity alone (without real content) moves
+#      the score.
+#
+# Every fact below was verified against the real ingested chunk text before
+# being written -- not assumed from the source PDFs' filenames or general
+# knowledge of the standards (see the SRM-4000/crane-spec correction earlier
+# in this dataset's history for why that verification step matters).
 
 - id: pit-daily-inspection
   question: "What must an operator check before operating a powered industrial truck each shift?"
@@ -46,6 +65,174 @@
   expected_keywords: ["hoist chain", "monthly"]
   notes: "Maintenance-schedule lookup, distinct phrasing from the daily-inspection PIT case."
 
+# --------------------------------------------------------------------------- #
+# Category 1: in-scope, deeper -- across the newly ingested documents
+# --------------------------------------------------------------------------- #
+
+- id: loto-inspection-frequency
+  question: "How often must an energy control procedure be inspected under the lockout/tagout standard?"
+  expected_source: "1910.147.pdf"
+  expected_keywords: ["annual"]
+  notes: "1910.147(c)(6)(i) -- periodic inspection, at least annually."
+
+- id: loto-who-inspects
+  question: "Who is permitted to perform the periodic inspection of a lockout energy control procedure?"
+  expected_source: "1910.147.pdf"
+  expected_keywords: ["authorized employee"]
+  notes: "1910.147(c)(6)(i)(A) -- must be an authorized employee OTHER than the one(s) using the procedure being inspected."
+
+- id: loto-training-tiers
+  question: "What categories of employees must be trained under the lockout/tagout standard?"
+  expected_source: "1910.147.pdf"
+  expected_keywords: ["authorized", "affected"]
+  notes: "1910.147(c)(7)(i) -- authorized, affected, and other employees."
+
+- id: loto-tag-limitation
+  question: "What is a key limitation of a tag compared to a lock under the lockout/tagout standard?"
+  expected_source: "1910.147.pdf"
+  expected_keywords: ["warning", "restraint"]
+  notes: "1910.147(c)(7)(ii)(A) -- tags are warning devices; they don't provide physical restraint the way a lock does."
+
+- id: fire-ext-class-a-distance
+  question: "What is the maximum travel distance to a Class A portable fire extinguisher?"
+  expected_source: "1910.157 - Portable fire extinguishers. _ Occupational Safety and Health Administration.pdf"
+  expected_keywords: ["75 feet"]
+  notes: "1910.157(d)(2)."
+
+- id: fire-ext-class-b-distance
+  question: "What is the maximum travel distance to a Class B portable fire extinguisher?"
+  expected_source: "1910.157 - Portable fire extinguishers. _ Occupational Safety and Health Administration.pdf"
+  expected_keywords: ["50 feet"]
+  notes: "1910.157(d)(4) -- distinct number from the Class A case, good precision check."
+
+- id: fire-ext-visual-inspection
+  question: "How often must portable fire extinguishers be visually inspected?"
+  expected_source: "1910.157 - Portable fire extinguishers. _ Occupational Safety and Health Administration.pdf"
+  expected_keywords: ["monthly"]
+  notes: "1910.157(e)(2)."
+
+- id: fire-ext-prohibited-agents
+  question: "What fire extinguisher agents are prohibited in the workplace under this standard?"
+  expected_source: "1910.157 - Portable fire extinguishers. _ Occupational Safety and Health Administration.pdf"
+  expected_keywords: ["carbon tetrachloride", "chlorobromomethane"]
+  notes: "1910.157(c)(3) -- specific, checkable named substances."
+
+- id: machine-guard-fan-blade-height
+  question: "At what height must fan blades be guarded under the machine guarding standard?"
+  expected_source: "1910.212 - General requirements for all machines. _ Occupational Safety and Health Administration.pdf"
+  expected_keywords: ["seven", "7"]
+  notes: "1910.212(a)(5) -- below 7 feet above floor/working level."
+
+- id: machine-guard-drums
+  question: "What guarding is required for revolving drums, barrels, and containers?"
+  expected_source: "1910.212 - General requirements for all machines. _ Occupational Safety and Health Administration.pdf"
+  expected_keywords: ["interlock", "enclosure"]
+  notes: "1910.212(a)(4)."
+
+- id: machine-guard-anchoring
+  question: "What must be done to machines designed for a fixed location to prevent them from moving?"
+  expected_source: "1910.212 - General requirements for all machines. _ Occupational Safety and Health Administration.pdf"
+  expected_keywords: ["anchor"]
+  notes: "1910.212(b)."
+
+- id: pump-pressure-differential
+  question: "What is the maximum allowable pressure difference between outlet and inlet pressure on the SCALA2 pump?"
+  expected_source: "SCALA2 Pump Manual.pdf"
+  expected_keywords: ["3.5 bar"]
+  notes: "Troubleshooting section -- direct spec lookup, comparable in kind to the crane's rated-load question."
+
+- id: pump-indicator-light-4
+  question: "What does it mean if the SCALA2 pump is not running and indicator light 4 is on?"
+  expected_source: "SCALA2 Pump Manual.pdf"
+  expected_keywords: ["dry running", "water shortage"]
+  notes: "Grundfos Eye troubleshooting table -- tests retrieval against dense, less prose-like manual content."
+
+- id: pump-children-warning
+  question: "Can the SCALA2 pump be cleaned or maintained by children?"
+  expected_source: "SCALA2 Pump Manual.pdf"
+  expected_keywords: ["children"]
+  notes: "General information / hazard statements section."
+
+- id: pump-megger-test-voltage
+  question: "What is the maximum test voltage used when megging the SCALA2 pump motor?"
+  expected_source: "SCALA2 Pump Manual.pdf"
+  expected_keywords: ["1000", "VAC"]
+  notes: "Electrical testing procedure -- dense tabular spec content, a harder retrieval case."
+
+# --------------------------------------------------------------------------- #
+# Category 2: cross-document near-misses -- the important ones
+# --------------------------------------------------------------------------- #
+#
+# Each question below touches a topic (lockout, training, inspection
+# intervals, or leaks) that genuinely appears in more than one ingested
+# document. expected_source names the one document that actually answers
+# THIS specific phrasing -- retrieval has to distinguish among similar
+# candidates, not just find "something relevant".
+
+- id: nearmiss-crane-loto-vs-osha-standard
+  question: "What is the lockout/tagout procedure for the AS/RS stacker crane?"
+  expected_source: "sample_crane_spec.md"
+  expected_keywords: ["lockout"]
+  notes: "Near-miss vs 1910.147.pdf (general LOTO standard) and the pump manual's own power-off instruction -- this phrasing asks about ONE specific machine's documented steps."
+
+- id: nearmiss-osha-loto-standard-vs-crane
+  question: "What must an employer establish as part of an OSHA energy control program?"
+  expected_source: "1910.147.pdf"
+  expected_keywords: ["energy control", "program"]
+  notes: "Reverse direction of the case above -- general regulatory language, not the crane's specific steps."
+
+- id: nearmiss-pump-power-off-vs-loto-standard
+  question: "What must be done to the power supply before starting work on the SCALA2 pump?"
+  expected_source: "SCALA2 Pump Manual.pdf"
+  expected_keywords: ["power supply", "disconnect"]
+  notes: "Near-miss vs 1910.147.pdf -- conceptually identical to general LOTO, but this phrasing names the specific product."
+
+- id: nearmiss-pit-training-vs-other-training
+  question: "What training must be completed before operating a powered industrial truck?"
+  expected_source: "OSHA-2011-0062-0014_content.pdf"
+  expected_keywords: ["training"]
+  notes: "Near-miss vs 1910.147.pdf's LOTO training tiers and 1910.157's fire extinguisher training -- 'training' alone is a weak signal across this corpus."
+
+- id: nearmiss-fireext-training-vs-other-training
+  question: "How often must employees receive fire extinguisher education?"
+  expected_source: "1910.157 - Portable fire extinguishers. _ Occupational Safety and Health Administration.pdf"
+  expected_keywords: ["annually", "initial"]
+  notes: "Reverse of the case above -- same 'training' topic, different correct document."
+
+- id: nearmiss-crane-hoist-inspection-vs-others
+  question: "What inspection interval applies to the hoist chain on the AS/RS crane?"
+  expected_source: "sample_crane_spec.md"
+  expected_keywords: ["hoist chain"]
+  notes: "Near-miss vs 1910.147's annual LOTO inspection, 1910.157's monthly extinguisher inspection, and the PIT's daily inspection -- four documents, four different inspection cadences."
+
+- id: nearmiss-pit-inspection-vs-others
+  question: "How often must a powered industrial truck be inspected before use?"
+  expected_source: "OSHA-2011-0062-0014_content.pdf"
+  expected_keywords: ["shift"]
+  notes: "Same inspection-interval confusion as above, different correct document and cadence (per-shift, not monthly or annual)."
+
+- id: nearmiss-loto-inspection-vs-others
+  question: "How often must the lockout/tagout energy control procedure itself be inspected?"
+  expected_source: "1910.147.pdf"
+  expected_keywords: ["annual"]
+  notes: "Third document in the inspection-interval near-miss cluster -- annual, distinct from the crane's monthly and the PIT's per-shift cadence."
+
+- id: nearmiss-pit-fuel-leak-vs-pump-leak
+  question: "What should be done if a powered industrial truck has a leak in its fuel system?"
+  expected_source: "OSHA-2011-0062-0014_content.pdf"
+  expected_keywords: ["leak"]
+  notes: "Near-miss vs the SCALA2 pump manual's own leakage-indicator troubleshooting -- both documents discuss 'leaks' as a serious fault condition, in different equipment domains."
+
+- id: nearmiss-pump-leak-vs-pit-leak
+  question: "What does it mean if the SCALA2 pump's indicator shows leakage in the installation after the pump?"
+  expected_source: "SCALA2 Pump Manual.pdf"
+  expected_keywords: ["leakage"]
+  notes: "Reverse of the case above -- same 'leak' topic, pump-specific troubleshooting rather than the PIT's out-of-service rule."
+
+# --------------------------------------------------------------------------- #
+# Category 3: true out-of-scope
+# --------------------------------------------------------------------------- #
+
 - id: out-of-scope-baseline
   question: "What's a good recipe for sourdough bread?"
   expected_source: null
@@ -54,3 +241,31 @@
     reference point for a future relevance threshold -- a real question
     scoring near this would mean retrieval is failing, not that the corpus
     simply lacks the answer.
+
+- id: out-of-scope-car-maintenance
+  question: "What is the recommended tire pressure for a Toyota Camry?"
+  expected_source: null
+  notes: "Same maintenance/spec-lookup genre as the real questions above, but a completely different equipment domain -- tests whether question *shape* alone drives up the score."
+
+- id: out-of-scope-medical
+  question: "What are the symptoms of seasonal allergies?"
+  expected_source: null
+
+- id: out-of-scope-networking
+  question: "How do I set up a VPN on my home router?"
+  expected_source: null
+
+- id: out-of-scope-trivia
+  question: "What is the boiling point of water at sea level?"
+  expected_source: null
+
+- id: out-of-scope-adjacent-osha-standard
+  question: "What fall-protection height requirement applies to scaffolding?"
+  expected_source: null
+  notes: >
+    Harder negative than the others: this is a real OSHA topic (1910.28,
+    scaffolding/fall protection) in the same regulatory family as the
+    ingested standards, but that standard itself was never ingested. Tests
+    whether OSHA-flavored phrasing alone pulls the score up even without a
+    real matching document -- the more informative kind of out-of-scope
+    case now that the corpus is larger and more OSHA-heavy.

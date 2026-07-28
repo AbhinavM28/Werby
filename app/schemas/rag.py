@@ -46,6 +46,10 @@ class QueryResponse(BaseModel):
     model: str = Field(description="Chat model that generated the answer.")
     retrieved_chunks: int
     latency_ms: int
+    sufficient_context: bool = Field(
+        description="False when no retrieved chunk cleared the relevance "
+        "threshold -- the answer above is a refusal, not a generated response."
+    )
 
 
 class IngestResponse(BaseModel):

@@ -100,7 +100,10 @@ if question := st.chat_input("e.g. What is the rated load of the AS/RS crane?"):
         with st.spinner("Retrieving and reasoning..."):
             try:
                 result = api_post("/query", json={"question": question})
-                st.markdown(result["answer"])
+                if result["sufficient_context"]:
+                    st.markdown(result["answer"])
+                else:
+                    st.warning(result["answer"])
                 st.caption(
                     f"{result['model']} · {result['retrieved_chunks']} chunks "
                     f"· {result['latency_ms']} ms"

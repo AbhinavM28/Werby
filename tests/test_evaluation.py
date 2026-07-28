@@ -22,7 +22,7 @@ from app.services.evaluation import (
     format_report,
     load_dataset,
 )
-from app.services.rag_service import RAGService
+from app.services.rag_service import NO_RELEVANT_CONTEXT_MESSAGE, RAGService
 from app.services.vector_store import RetrievedChunk, VectorStore
 
 
@@ -253,6 +253,40 @@ def test_run_raises_on_empty_corpus(embeddings, llm, judge) -> None:
     with pytest.raises(EmptyCorpusError):
         case = EvalCase(id="hit", question=HIT_Q, expected_source="crane_spec.pdf")
         service.run([case])
+
+
+def test_rank_and_score_stay_pre_filter_even_when_answer_needed(
+    embeddings, llm, judge
+) -> None:
+    """RAGService.query() applies a relevance threshold before generating an
+    answer; EvaluationService must still report rank/top_score from raw,
+    pre-filter retrieval regardless of whether an answer was also needed --
+    otherwise hit-rate would silently mean two different things depending on
+    whether a case happens to have expected_keywords or judging enabled."""
+    low_score_q = "What is a barely-relevant tangential question?"
+    store = ScriptedVectorStore(
+        {low_score_q: [RetrievedChunk("borderline", "crane_spec.pdf", 0, 0.2)]}
+    )
+    rag = RAGService(embeddings, store, llm, default_top_k=5, relevance_threshold=0.5)
+    service = EvaluationService(rag=rag, judge=judge)
+    case = EvalCase(
+        id="low-score",
+        question=low_score_q,
+        expected_source="crane_spec.pdf",
+        expected_keywords=["borderline"],  # forces needs_answer=True
+    )
+
+    report = service.run([case], use_judge=False)
+
+    result = report.results[0]
+    # Raw retrieval found the right document at rank 1, score 0.2 -- that
+    # must be visible even though query()'s 0.5 threshold refused to answer.
+    assert result.rank == 1
+    assert result.top_score == pytest.approx(0.2)
+    # The refusal message, not a real generated answer, so keyword matching
+    # correctly finds nothing rather than erroring.
+    assert result.answer == NO_RELEVANT_CONTEXT_MESSAGE
+    assert result.keyword_check.matched == []
 
 
 # --------------------------------------------------------------------------- #

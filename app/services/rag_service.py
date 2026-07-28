@@ -91,14 +91,16 @@ class RAGService:
         self._default_top_k = default_top_k
         self._max_context_chars = max_context_chars
 
-    def query(self, question: str, top_k: int | None = None) -> RAGAnswer:
-        """Run the full retrieve-then-generate pipeline.
+    def retrieve(self, question: str, top_k: int | None = None) -> list[RetrievedChunk]:
+        """The read path's retrieval step, isolated from generation.
+
+        Split out from ``query`` so callers that only need retrieval quality
+        (the evaluation harness, see ``app/services/evaluation.py``) can reuse
+        the exact same embed-and-search logic without paying for an LLM call.
 
         Raises:
             EmptyCorpusError: If no documents have been ingested yet.
         """
-        started = time.perf_counter()
-
         if self._store.count() == 0:
             raise EmptyCorpusError(
                 "No documents have been ingested yet. Upload documentation "
@@ -111,6 +113,17 @@ class RAGService:
         logger.info(
             "Retrieved %d chunks for question: %.80s", len(retrieved), question
         )
+        return retrieved
+
+    def query(self, question: str, top_k: int | None = None) -> RAGAnswer:
+        """Run the full retrieve-then-generate pipeline.
+
+        Raises:
+            EmptyCorpusError: If no documents have been ingested yet.
+        """
+        started = time.perf_counter()
+
+        retrieved = self.retrieve(question, top_k)
 
         context = build_context(retrieved, max_chars=self._max_context_chars)
         answer = self._llm.generate_answer(question, context)

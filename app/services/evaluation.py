@@ -19,7 +19,15 @@ Three metrics, three different costs:
 * **Keyword faithfulness** is free and deterministic: a case-insensitive
   substring check against the generated answer. Shallow (lexical, not
   semantic) but has zero cost and zero flakiness, so it always runs when a
-  case supplies ``expected_keywords``.
+  case supplies ``expected_keywords``. Some questions have more than one
+  textually-correct answer -- different true clauses of the same source --
+  where a single fixed keyword set would fail a correct answer that simply
+  led with a different (but equally true) clause than the dataset author
+  wrote first. ``expected_keyword_groups`` handles that: one or more
+  AND-groups, passing if the answer fully satisfies ANY one. This is a
+  dataset-authoring fix, not a matching-algorithm one -- a fuzzy/synonym
+  matcher would only help if the model reworded the *same* fact, and this is
+  about two *different* true facts both being acceptable.
 * **LLM-judge faithfulness** is the only metric that costs a real model call
   and is never deterministic. It is entirely optional (``use_judge=False``
   skips it) and injected through ``FaithfulnessJudge`` -- an ABC mirroring
@@ -47,7 +55,7 @@ from enum import Enum
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.core.exceptions import EvaluationDatasetError
 from app.services.llm_service import build_context
@@ -73,6 +81,7 @@ class EvalCase(BaseModel):
     question: str = Field(min_length=1)
     expected_source: str | None = None
     expected_keywords: list[str] = Field(default_factory=list)
+    expected_keyword_groups: list[list[str]] | None = None
     notes: str | None = None
 
     @property
@@ -84,6 +93,42 @@ class EvalCase(BaseModel):
         hit-rate to check, only a score to observe.
         """
         return self.expected_source is not None
+
+    @property
+    def keyword_groups(self) -> list[list[str]]:
+        """One or more AND-groups; the case passes if the answer fully
+        satisfies ANY one group -- see ``expected_keyword_groups``'s
+        docstring above for why. A plain ``expected_keywords`` list is just
+        the single-group case, normalized here so ``_check_keywords`` never
+        needs to branch on which field a case actually used.
+        """
+        if self.expected_keyword_groups is not None:
+            return self.expected_keyword_groups
+        return [self.expected_keywords]
+
+    @model_validator(mode="after")
+    def _validate_keyword_fields(self) -> "EvalCase":
+        """expected_keywords and expected_keyword_groups are mutually
+        exclusive (ambiguous which should apply if both are set), and every
+        group in expected_keyword_groups must be non-empty -- an empty
+        group would trivially satisfy len(matched) == len(group) (0 == 0),
+        silently auto-passing the case regardless of any other group.
+        """
+        if self.expected_keyword_groups is not None:
+            if self.expected_keywords:
+                raise ValueError(
+                    "Set either expected_keywords or expected_keyword_groups, "
+                    "not both -- ambiguous which should apply."
+                )
+            if not self.expected_keyword_groups or any(
+                not group for group in self.expected_keyword_groups
+            ):
+                raise ValueError(
+                    "expected_keyword_groups must be a non-empty list of "
+                    "non-empty keyword groups -- an empty group would "
+                    "trivially auto-pass every case."
+                )
+        return self
 
 
 def load_dataset(path: Path) -> list[EvalCase]:
@@ -123,7 +168,15 @@ def load_dataset(path: Path) -> list[EvalCase]:
 
 @dataclass(frozen=True)
 class KeywordCheck:
-    """Deterministic, free faithfulness signal: keyword presence in the answer."""
+    """Deterministic, free faithfulness signal: keyword presence in the answer.
+
+    ``expected``/``matched`` describe the single best-matching AND-group out
+    of the case's ``keyword_groups`` (see ``EvalCase``) -- whichever group is
+    fully matched, or failing that, whichever came closest. For a case using
+    the plain ``expected_keywords`` field there's only ever one group, so
+    this is exactly today's behavior; for ``expected_keyword_groups`` cases
+    it's the group the report should actually show, not an arbitrary one.
+    """
 
     expected: list[str]
     matched: list[str]
@@ -506,16 +559,16 @@ class EvaluationService:
         top_score = retrieved[0].score if retrieved else None
 
         # Only pay for an LLM answer when a metric actually needs one -- an
-        # out-of-scope case with no expected_keywords and no judge only needs
-        # retrieval, which is free of LLM cost.
-        needs_answer = bool(case.expected_keywords) or use_judge
+        # out-of-scope case with no keyword requirement and no judge only
+        # needs retrieval, which is free of LLM cost.
+        needs_answer = any(case.keyword_groups) or use_judge
         answer: str | None = None
         answer_context: list[RetrievedChunk] = []
         if needs_answer:
             result = self._rag.query(case.question, top_k=top_k)
             answer, answer_context = result.answer, result.sources
 
-        keyword_check = self._check_keywords(case.expected_keywords, answer)
+        keyword_check = self._check_keywords(case.keyword_groups, answer)
 
         faithfulness = None
         if use_judge and answer is not None:
@@ -546,12 +599,26 @@ class EvaluationService:
         return None
 
     @staticmethod
-    def _check_keywords(expected: list[str], answer: str | None) -> KeywordCheck:
-        if not expected or answer is None:
-            return KeywordCheck(expected=expected, matched=[])
+    def _check_keywords(groups: list[list[str]], answer: str | None) -> KeywordCheck:
+        """Check each AND-group against the answer; report whichever group
+        is fully matched (first one, in declaration order), or failing that,
+        whichever came closest -- see KeywordCheck's docstring for why."""
+        if answer is None:
+            first = groups[0] if groups else []
+            return KeywordCheck(expected=first, matched=[])
+
         lowered = answer.lower()
-        matched = [kw for kw in expected if kw.lower() in lowered]
-        return KeywordCheck(expected=expected, matched=matched)
+        scored = [
+            (group, [kw for kw in group if kw.lower() in lowered]) for group in groups
+        ]
+        for group, matched in scored:
+            if group and len(matched) == len(group):
+                return KeywordCheck(expected=group, matched=matched)
+
+        best_group, best_matched = max(
+            scored, key=lambda pair: len(pair[1]), default=([], [])
+        )
+        return KeywordCheck(expected=best_group, matched=best_matched)
 
 
 def format_report(report: EvaluationReport) -> str:

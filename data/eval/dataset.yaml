@@ -90,8 +90,14 @@
 - id: loto-tag-limitation
   question: "What is a key limitation of a tag compared to a lock under the lockout/tagout standard?"
   expected_source: "1910.147.pdf"
-  expected_keywords: ["warning", "restraint"]
-  notes: "1910.147(c)(7)(ii)(A) -- tags are warning devices; they don't provide physical restraint the way a lock does."
+  expected_keyword_groups: [["warning", "restraint"], ["strength", "removal"]]
+  notes: >
+    OR-groups: the standard supports two distinct, equally valid true
+    answers -- 1910.147(c)(7)(ii)(A) frames tags as warning devices without
+    physical restraint; 1910.147(c)(5)(ii) frames the same limitation via
+    minimum unlocking-strength and removability. Reranking legitimately
+    shifted which clause the LLM's context led with (see the reranking
+    benchmark keyword-regression investigation).
 
 - id: fire-ext-class-a-distance
   question: "What is the maximum travel distance to a Class A portable fire extinguisher?"
@@ -208,8 +214,14 @@
 - id: nearmiss-pit-inspection-vs-others
   question: "How often must a powered industrial truck be inspected before use?"
   expected_source: "OSHA-2011-0062-0014_content.pdf"
-  expected_keywords: ["shift"]
-  notes: "Same inspection-interval confusion as above, different correct document and cadence (per-shift, not monthly or annual)."
+  expected_keyword_groups: [["shift"], ["daily"]]
+  notes: >
+    Same inspection-interval confusion as above, different correct document
+    and cadence (per-shift or daily, not monthly or annual). OR-groups:
+    1910.178(q)(7) states this as two true clauses in the same subsection --
+    "at least daily" (general case) and "after each shift" (round-the-clock
+    case). Either is a fully correct answer; which one an answer leads with
+    is a stylistic choice, not a correctness signal.
 
 - id: nearmiss-loto-inspection-vs-others
   question: "How often must the lockout/tagout energy control procedure itself be inspected?"

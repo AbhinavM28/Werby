@@ -9,6 +9,7 @@ hand-rolled fake implementing FaithfulnessJudge -- never a real model call.
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.exceptions import EmptyCorpusError, EvaluationDatasetError
 from app.services.document_processor import DocumentChunk
@@ -387,6 +388,83 @@ def test_answer_generated_when_keywords_present(embeddings, llm, judge) -> None:
 
     llm.generate_answer.assert_called_once()
     assert report.results[0].answer is not None
+
+
+def test_keyword_groups_backward_compat_with_plain_expected_keywords(
+    embeddings, llm, judge
+) -> None:
+    """A case using the plain expected_keywords field must behave exactly
+    as before this feature existed: single-group semantics, full match
+    required, no OR-group machinery visible in the result."""
+    llm.generate_answer.return_value = "Rated load is 2000 kg for the boom."
+    service = make_service(embeddings, llm, judge)
+    case = EvalCase(
+        id="hit", question=HIT_Q, expected_source="crane_spec.pdf",
+        expected_keywords=["load", "boom"],
+    )
+
+    report = service.run([case], use_judge=False)
+
+    check = report.results[0].keyword_check
+    assert check.expected == ["load", "boom"]
+    assert check.matched == ["load", "boom"]
+    assert check.passed is True
+
+
+def test_keyword_or_group_passes_via_second_group(embeddings, llm, judge) -> None:
+    """The answer only satisfies the SECOND group -- proves the matcher
+    checks every group, not just the first, and that group declaration
+    order doesn't determine correctness."""
+    llm.generate_answer.return_value = "It must be examined at least daily."
+    service = make_service(embeddings, llm, judge)
+    case = EvalCase(
+        id="hit", question=HIT_Q, expected_source="crane_spec.pdf",
+        expected_keyword_groups=[["shift"], ["daily"]],
+    )
+
+    report = service.run([case], use_judge=False)
+
+    check = report.results[0].keyword_check
+    assert check.expected == ["daily"]
+    assert check.matched == ["daily"]
+    assert check.passed is True
+
+
+def test_keyword_or_group_fails_when_no_group_fully_matches(
+    embeddings, llm, judge
+) -> None:
+    """Neither group is fully satisfied -- must fail, not partially pass."""
+    llm.generate_answer.return_value = "It must be examined periodically."
+    service = make_service(embeddings, llm, judge)
+    case = EvalCase(
+        id="hit", question=HIT_Q, expected_source="crane_spec.pdf",
+        expected_keyword_groups=[["shift"], ["daily"]],
+    )
+
+    report = service.run([case], use_judge=False)
+
+    check = report.results[0].keyword_check
+    assert check.matched == []
+    assert check.passed is False
+
+
+def test_eval_case_rejects_empty_keyword_group() -> None:
+    """An empty group would trivially auto-pass (0 == 0) regardless of any
+    other group -- must fail loudly at load time, not silently."""
+    with pytest.raises(ValidationError, match="non-empty"):
+        EvalCase(
+            id="hit", question=HIT_Q,
+            expected_keyword_groups=[[], ["daily"]],
+        )
+
+
+def test_eval_case_rejects_both_keyword_fields_set() -> None:
+    with pytest.raises(ValidationError, match="not both"):
+        EvalCase(
+            id="hit", question=HIT_Q,
+            expected_keywords=["daily"],
+            expected_keyword_groups=[["shift"]],
+        )
 
 
 # --------------------------------------------------------------------------- #

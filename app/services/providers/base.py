@@ -17,6 +17,8 @@ composition root (``app/api/deps.py``) picks the implementation from Settings.
 
 from abc import ABC, abstractmethod
 
+from app.services.vector_store import RetrievedChunk
+
 
 class EmbeddingProvider(ABC):
     """Converts text into dense vectors for similarity search.
@@ -65,3 +67,19 @@ class LLMProvider(ABC):
         Raises:
             LLMServiceError: On persistent provider failure.
         """
+
+
+class Reranker(ABC):
+    """Reorders retrieved chunks by relevance to a query.
+
+    Same argument as ``EmbeddingProvider``/``LLMProvider``: which reranking
+    backend runs (a local cross-encoder vs. a future hosted API) is a
+    deployment decision, not a code decision, so it lives behind an
+    interface RAGService depends on rather than a concrete class.
+    """
+
+    @abstractmethod
+    def rerank(
+        self, query: str, candidates: list[RetrievedChunk], top_k: int
+    ) -> list[RetrievedChunk]:
+        """Return candidates reordered by relevance to query, truncated to top_k."""

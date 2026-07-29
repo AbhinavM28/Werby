@@ -10,6 +10,7 @@ import pytest
 
 from app.core.exceptions import EmptyCorpusError
 from app.services.document_processor import DocumentChunk
+from app.services.providers.base import Reranker
 from app.services.rag_service import NO_RELEVANT_CONTEXT_MESSAGE, RAGService
 from app.services.vector_store import RetrievedChunk, VectorStore
 
@@ -32,6 +33,21 @@ class FakeVectorStore(VectorStore):
 
     def delete_document(self, source_document: str) -> int:
         return 0
+
+
+class FakeReranker(Reranker):
+    """Predictable, deterministic rule (reverse order) -- never loads a
+    real cross-encoder. Records each call's (query, pool size, top_k) so
+    tests can assert what RAGService actually asked for."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, int]] = []
+
+    def rerank(
+        self, query: str, candidates: list[RetrievedChunk], top_k: int
+    ) -> list[RetrievedChunk]:
+        self.calls.append((query, len(candidates), top_k))
+        return list(reversed(candidates))[:top_k]
 
 
 @pytest.fixture
@@ -120,4 +136,60 @@ def test_query_boundary_score_equal_to_threshold_passes(embeddings, llm) -> None
 
     assert result.sufficient_context is True
     assert len(result.sources) == 1
+
+
+def test_no_reranker_leaves_query_output_unchanged(embeddings, llm) -> None:
+    """reranker=None (the default) must be a true no-op: query()'s final
+    sources must be identical -- in order, content, and score -- to
+    retrieve()'s raw output on the same instance. Not "runs without
+    error": a direct equality check against the untouched pre-feature
+    method, proving nothing about existing behavior moved."""
+    chunks = [
+        RetrievedChunk("load spec", "crane.pdf", 0, 0.91),
+        RetrievedChunk("training reqs", "pit.pdf", 1, 0.72),
+        RetrievedChunk("inspection interval", "crane.pdf", 2, 0.58),
+    ]
+    store = FakeVectorStore(chunks)
+    # reranker not passed -> defaults to None
+    service = RAGService(embeddings, store, llm, default_top_k=3)
+
+    baseline = service.retrieve("q")
+    result = service.query("q")
+
+    assert result.sources == baseline
+    assert [c.chunk_index for c in result.sources] == [0, 1, 2]
+    assert [c.score for c in result.sources] == [0.91, 0.72, 0.58]
+
+
+def test_rerank_reorders_via_configured_reranker(embeddings, llm) -> None:
+    chunks = [
+        RetrievedChunk(f"chunk {i}", "doc.pdf", i, 0.9 - i * 0.01) for i in range(4)
+    ]
+    store = FakeVectorStore(chunks)
+    reranker = FakeReranker()
+    service = RAGService(
+        embeddings, store, llm, reranker=reranker, retrieve_n=4, default_top_k=4
+    )
+
+    result = service.query("q")
+
+    # FakeReranker reverses order -- chunk 3 (originally last) is now first.
+    assert [c.chunk_index for c in result.sources] == [3, 2, 1, 0]
+    assert reranker.calls == [("q", 4, 4)]
+
+
+def test_rerank_widens_pool_then_narrows_to_top_k(embeddings, llm) -> None:
+    chunks = [RetrievedChunk(f"chunk {i}", "doc.pdf", i, 0.9) for i in range(10)]
+    store = FakeVectorStore(chunks)
+    reranker = FakeReranker()
+    service = RAGService(
+        embeddings, store, llm, reranker=reranker, retrieve_n=8, default_top_k=3
+    )
+
+    result = service.query("q")
+
+    # retrieve() was asked for the wide pool (8), not the final top_k (3).
+    assert reranker.calls[0][1] == 8
+    # and the final output is narrowed to top_k.
+    assert len(result.sources) == 3
     llm.generate_answer.assert_called_once()

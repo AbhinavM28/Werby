@@ -22,6 +22,7 @@ from app.services.evaluation import (
     format_report,
     load_dataset,
 )
+from app.services.providers.base import Reranker
 from app.services.rag_service import NO_RELEVANT_CONTEXT_MESSAGE, RAGService
 from app.services.vector_store import RetrievedChunk, VectorStore
 
@@ -287,6 +288,60 @@ def test_rank_and_score_stay_pre_filter_even_when_answer_needed(
     # correctly finds nothing rather than erroring.
     assert result.answer == NO_RELEVANT_CONTEXT_MESSAGE
     assert result.keyword_check.matched == []
+
+
+class _ReverseReranker(Reranker):
+    """Predictable, deterministic rule (reverse order) -- never loads a
+    real cross-encoder. Enough to prove pre- and post-rerank measurements
+    can genuinely differ."""
+
+    def rerank(
+        self, query: str, candidates: list[RetrievedChunk], top_k: int
+    ) -> list[RetrievedChunk]:
+        return list(reversed(candidates))[:top_k]
+
+
+def test_pre_and_post_rerank_rank_diverge_when_reranking_promotes_a_chunk(
+    embeddings, llm, judge
+) -> None:
+    """The scenario this feature exists for: the expected source is buried
+    at the bottom of the raw dense-search pool, and reranking promotes it
+    to the top of the final result. pre_rerank_hit is True either way here
+    (retrieve_n covers the whole pool, so the doc was always "findable" in
+    it -- reranking can only reorder what's already retrieved, never
+    recover what dense search never surfaced at all) -- the number that
+    actually moves is rank: buried at 5, promoted to 1. That's the real,
+    demonstrable value reranking adds, and format_report must surface it."""
+    q = "which document actually answers this?"
+    pool = [
+        RetrievedChunk("wrong content", "wrong.pdf", i, 0.9 - i * 0.01)
+        for i in range(4)
+    ] + [RetrievedChunk("right answer", "right.pdf", 4, 0.5)]
+    store = ScriptedVectorStore({q: pool})
+    rag = RAGService(
+        embeddings, store, llm,
+        default_top_k=2, reranker=_ReverseReranker(), retrieve_n=5,
+    )
+    service = EvaluationService(rag=rag, judge=judge, default_top_k=2, retrieve_n=5)
+    case = EvalCase(id="promoted", question=q, expected_source="right.pdf")
+
+    report = service.run([case], use_judge=False)
+
+    result = report.results[0]
+    # Pre-rerank: right.pdf is 5th of 5 in the wide pool -- found, but buried.
+    assert result.pre_rerank_rank == 5
+    assert result.pre_rerank_hit is True
+    # Post-rerank: reversing the pool puts it first.
+    assert result.rank == 1
+    assert result.hit is True
+
+    assert report.pre_rerank_hit_rate == 100.0
+    assert report.hit_rate == 100.0
+
+    # The per-case rank improvement must be visible in the report, not just
+    # in the aggregate rate (which can't show it when both are 100%).
+    text = format_report(report)
+    assert "[pre-rerank: r5]" in text
 
 
 # --------------------------------------------------------------------------- #

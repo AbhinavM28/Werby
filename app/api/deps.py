@@ -27,7 +27,7 @@ from app.services.evaluation import (
     LLMFaithfulnessJudge,
 )
 from app.services.llm_service import LLMService
-from app.services.providers.base import EmbeddingProvider, LLMProvider
+from app.services.providers.base import EmbeddingProvider, LLMProvider, Reranker
 from app.services.rag_service import IngestionService, RAGService
 from app.services.vector_store import ChromaVectorStore, VectorStore
 
@@ -116,6 +116,19 @@ def get_vector_store() -> VectorStore:
     )
 
 
+@lru_cache
+def get_reranker() -> Reranker | None:
+    """None when reranking is off -- deliberately, so nobody pays the
+    sentence-transformers/model-download cost who hasn't opted in."""
+    settings = get_settings()
+    if not settings.rerank_enabled:
+        return None
+
+    from app.services.providers.local_reranker import LocalCrossEncoderReranker
+
+    return LocalCrossEncoderReranker(model_name=settings.rerank_model)
+
+
 def get_llm_service() -> LLMService:
     return LLMService(provider=get_llm_provider())
 
@@ -141,6 +154,8 @@ def get_rag_service() -> RAGService:
         default_top_k=settings.retrieval_top_k,
         max_context_chars=settings.max_context_chars,
         relevance_threshold=settings.relevance_threshold,
+        reranker=get_reranker(),
+        retrieve_n=settings.retrieve_n,
     )
 
 
@@ -155,6 +170,7 @@ def get_evaluation_service() -> EvaluationService:
         judge=get_faithfulness_judge(),
         default_top_k=settings.retrieval_top_k,
         max_context_chars=settings.max_context_chars,
+        retrieve_n=settings.retrieve_n,
     )
 
 

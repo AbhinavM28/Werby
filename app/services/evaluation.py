@@ -12,7 +12,10 @@ Three metrics, three different costs:
   The score distribution specifically separates in-scope questions (where a
   correct source is expected) from out-of-scope ones (where none is), because
   the *gap* between those two populations -- not either number alone -- is
-  what a future relevance threshold would sit between.
+  what a future relevance threshold would sit between. Hit-rate is measured
+  twice, pre- and post-rerank (via ``RAGService.retrieve()`` and ``rerank()``
+  independently) -- the gap between *those* two numbers is what a reranker is
+  actually worth, separate from whatever a relevance threshold contributes.
 * **Keyword faithfulness** is free and deterministic: a case-insensitive
   substring check against the generated answer. Shallow (lexical, not
   semantic) but has zero cost and zero flakiness, so it always runs when a
@@ -282,9 +285,11 @@ class CaseResult:
     """Outcome of running one ``EvalCase`` through the pipeline."""
 
     case: EvalCase
-    retrieved: list[RetrievedChunk]
-    rank: int | None  # 1-indexed position of expected_source; None = miss
-    top_score: float | None  # score of the #1 retrieved chunk, if any
+    retrieved: list[RetrievedChunk]  # final, post-rerank candidates
+    rank: int | None  # post-rerank 1-indexed position of expected_source; None = miss
+    top_score: float | None  # post-rerank score of the #1 chunk, if any
+    pre_rerank_rank: int | None  # rank within the wide dense-search pool
+    pre_rerank_top_score: float | None  # top score within that wide pool
     keyword_check: KeywordCheck
     faithfulness: FaithfulnessResult | None  # None if the judge wasn't run
     answer: str | None  # None if no answer needed to be generated
@@ -295,6 +300,17 @@ class CaseResult:
         if not self.case.in_scope:
             return None
         return self.rank is not None
+
+    @property
+    def pre_rerank_hit(self) -> bool | None:
+        """Same as ``hit``, but measured against the wide pre-rerank pool.
+
+        The gap between this and ``hit`` across a whole report is the value
+        reranking adds -- see ``EvaluationReport.pre_rerank_hit_rate``.
+        """
+        if not self.case.in_scope:
+            return None
+        return self.pre_rerank_rank is not None
 
 
 def _mean(values: Iterable[float]) -> float | None:
@@ -329,6 +345,21 @@ class EvaluationReport:
         if not in_scope:
             return None
         hits = sum(1 for r in in_scope if r.hit)
+        return round(hits / len(in_scope) * 100, 2)
+
+    @property
+    def pre_rerank_hit_rate(self) -> float | None:
+        """Same as ``hit_rate``, measured against the wide pre-rerank pool.
+
+        Without a reranker configured, this comes out ~equal to ``hit_rate``
+        (reranking is a no-op truncation of the same pool). Once one is
+        configured, the difference between the two rates is the reranker's
+        measured contribution -- the number this feature exists to produce.
+        """
+        in_scope = self.in_scope_results
+        if not in_scope:
+            return None
+        hits = sum(1 for r in in_scope if r.pre_rerank_hit)
         return round(hits / len(in_scope) * 100, 2)
 
     @property
@@ -420,11 +451,13 @@ class EvaluationService:
         judge: FaithfulnessJudge,
         default_top_k: int = 5,
         max_context_chars: int = 12_000,
+        retrieve_n: int = 20,
     ) -> None:
         self._rag = rag
         self._judge = judge
         self._default_top_k = default_top_k
         self._max_context_chars = max_context_chars
+        self._retrieve_n = retrieve_n
 
     def run(
         self,
@@ -443,16 +476,28 @@ class EvaluationService:
         return EvaluationReport(results=results)
 
     def _run_case(self, case: EvalCase, top_k: int, use_judge: bool) -> CaseResult:
-        # Rank/top_score are always measured against retrieve()'s raw output,
-        # never query()'s -- RAGService.query() now applies a relevance
-        # threshold before generating an answer, and if rank/score came from
-        # it, a case that happens to need an answer (has expected_keywords or
-        # the judge is on) would silently measure *post-filter* retrieval
-        # while every other case still measures *pre-filter* retrieval. That
-        # would make hit-rate depend on an unrelated flag instead of on
-        # retrieval quality, which is the one thing this harness exists to
-        # measure honestly.
-        retrieved = self._rag.retrieve(case.question, top_k=top_k)
+        # Rank/top_score are always measured via direct retrieve()/rerank()
+        # calls, never via query()'s -- RAGService.query() applies a
+        # relevance threshold before generating an answer, and if rank/score
+        # came from it, a case that happens to need an answer (has
+        # expected_keywords or the judge is on) would silently measure
+        # different retrieval than every other case. That would make
+        # hit-rate depend on an unrelated flag instead of on retrieval
+        # quality, which is the one thing this harness exists to measure
+        # honestly.
+        #
+        # Two checkpoints, both from RAGService itself (never reimplemented
+        # here): the wide pre-rerank pool, and what reranking narrows it to.
+        # Without a reranker configured, RAGService.rerank() is a no-op
+        # truncation, so the two will come out ~equal -- that's expected, not
+        # a bug, and is itself useful confirmation that nothing changed.
+        pool = self._rag.retrieve(case.question, top_k=self._retrieve_n)
+        pre_rank = (
+            self._rank_of(case.expected_source, pool) if case.expected_source else None
+        )
+        pre_top_score = pool[0].score if pool else None
+
+        retrieved = self._rag.rerank(case.question, pool, top_k=top_k)
         rank = (
             self._rank_of(case.expected_source, retrieved)
             if case.expected_source
@@ -486,6 +531,8 @@ class EvaluationService:
             retrieved=retrieved,
             rank=rank,
             top_score=top_score,
+            pre_rerank_rank=pre_rank,
+            pre_rerank_top_score=pre_top_score,
             keyword_check=keyword_check,
             faithfulness=faithfulness,
             answer=answer,
@@ -545,9 +592,17 @@ def format_report(report: EvaluationReport) -> str:
         faithful = "n/a"
         if r.faithfulness is not None:
             faithful = _VERDICT_LABELS[r.faithfulness.verdict]
+
+        rerank_note = ""
+        if r.case.in_scope and r.pre_rerank_rank != r.rank:
+            pre_label = (
+                f"r{r.pre_rerank_rank}" if r.pre_rerank_rank is not None else "miss"
+            )
+            rerank_note = f"  [pre-rerank: {pre_label}]"
+
         lines.append(
             f"[{status}] {r.case.id:<28} score={score}  "
-            f"keywords={kw}  faithful={faithful}"
+            f"keywords={kw}  faithful={faithful}{rerank_note}"
         )
         lines.append(f"    Q: {r.case.question}")
 
@@ -562,6 +617,10 @@ def format_report(report: EvaluationReport) -> str:
         return "n/a" if value is None else f"{value:.4f}"
 
     lines.append(f"Hit-rate:                 {fmt_pct(report.hit_rate)}")
+    lines.append(f"Pre-rerank hit-rate:      {fmt_pct(report.pre_rerank_hit_rate)}")
+    if report.hit_rate is not None and report.pre_rerank_hit_rate is not None:
+        delta = round(report.hit_rate - report.pre_rerank_hit_rate, 2)
+        lines.append(f"Reranking delta:          {delta:+.1f}%")
     lines.append(f"Mean in-scope score:      {fmt_score(report.mean_in_scope_score)}")
     lines.append(
         f"Mean out-of-scope score:  {fmt_score(report.mean_out_of_scope_score)}"

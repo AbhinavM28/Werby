@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from app.core.exceptions import EmptyCorpusError
 from app.services.document_processor import DocumentProcessor
 from app.services.llm_service import LLMService, build_context
-from app.services.providers.base import EmbeddingProvider
+from app.services.providers.base import EmbeddingProvider, Reranker
 from app.services.vector_store import RetrievedChunk, VectorStore
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,8 @@ class RAGService:
         default_top_k: int = 5,
         max_context_chars: int = 12_000,
         relevance_threshold: float = 0.35,
+        reranker: Reranker | None = None,
+        retrieve_n: int = 20,
     ) -> None:
         self._embeddings = embeddings
         self._store = store
@@ -99,6 +101,8 @@ class RAGService:
         self._default_top_k = default_top_k
         self._max_context_chars = max_context_chars
         self._relevance_threshold = relevance_threshold
+        self._reranker = reranker
+        self._retrieve_n = retrieve_n
 
     def retrieve(self, question: str, top_k: int | None = None) -> list[RetrievedChunk]:
         """The read path's retrieval step, isolated from generation.
@@ -124,6 +128,38 @@ class RAGService:
         )
         return retrieved
 
+    def rerank(
+        self,
+        question: str,
+        candidates: list[RetrievedChunk],
+        top_k: int | None = None,
+    ) -> list[RetrievedChunk]:
+        """Reorder retrieve()'s candidates by cross-encoder relevance.
+
+        Split out from ``query`` for the same reason ``retrieve`` is: the
+        evaluation harness needs to measure retrieval quality at two
+        checkpoints independently -- pre-rerank (was the right chunk
+        anywhere in the wide candidate pool?) and post-rerank (did reranking
+        promote it into the final set that actually reaches the LLM?) --
+        without reimplementing this logic itself.
+
+        A graceful no-op when no reranker is configured (``reranker=None``,
+        the default): just truncates to top_k, so callers see identical
+        behavior to before this feature existed. This is deliberately the
+        *only* switch -- there's no separate "rerank_enabled" flag on this
+        class, because that would allow the nonsensical state of "enabled"
+        with nothing to enable.
+        """
+        k = top_k or self._default_top_k
+        if self._reranker is None or not candidates:
+            return candidates[:k]
+        reranked = self._reranker.rerank(question, candidates, top_k=k)
+        logger.info(
+            "Reranked %d candidate(s) to top %d for question: %.80s",
+            len(candidates), len(reranked), question,
+        )
+        return reranked
+
     def _filter_by_relevance(
         self, chunks: list[RetrievedChunk]
     ) -> list[RetrievedChunk]:
@@ -145,7 +181,14 @@ class RAGService:
         return survivors
 
     def query(self, question: str, top_k: int | None = None) -> RAGAnswer:
-        """Run the full retrieve-then-generate pipeline.
+        """Run the full retrieve-then-rerank-then-generate pipeline.
+
+        When a reranker is configured, retrieval widens to ``retrieve_n``
+        candidates first -- a cross-encoder can only promote a chunk that's
+        in the pool it's given, not recover one dense search never surfaced
+        at all -- then reranks down to ``top_k`` before anything else
+        happens. Without a reranker, this widening doesn't happen and
+        behavior is identical to before this feature existed.
 
         Chunks below ``relevance_threshold`` are discarded before context is
         built. If none survive, this returns a refusal instead of calling the
@@ -158,8 +201,11 @@ class RAGService:
         """
         started = time.perf_counter()
 
-        retrieved = self.retrieve(question, top_k)
-        relevant = self._filter_by_relevance(retrieved)
+        k = top_k or self._default_top_k
+        pool_size = self._retrieve_n if self._reranker is not None else k
+        candidates = self.retrieve(question, top_k=pool_size)
+        ranked = self.rerank(question, candidates, top_k=k)
+        relevant = self._filter_by_relevance(ranked)
 
         if not relevant:
             latency_ms = int((time.perf_counter() - started) * 1000)

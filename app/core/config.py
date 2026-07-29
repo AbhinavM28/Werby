@@ -14,6 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -84,6 +85,40 @@ class Settings(BaseSettings):
     # (including near-miss, not just obviously-unrelated, questions) is
     # available -- see README's Evaluation section.
     relevance_threshold: float = 0.35  # hard cap on prompt context size
+
+    # --- Reranking ---
+    # Cross-encoders score (query, chunk) jointly and catch cases pure vector
+    # similarity misses -- e.g. a short, specific document losing to a long,
+    # vocabulary-dense one on a query about that specific topic (a real,
+    # measured failure: see app/services/providers/local_reranker.py). Off
+    # by default so existing retrieval behavior is unchanged until explicitly
+    # enabled, and enabling it requires the optional 'local' extra.
+    rerank_enabled: bool = False
+    # Candidate pool size fed to the reranker. Generous on purpose: the
+    # reranker can only promote a chunk that's IN the pool -- it can't
+    # recover one dense search never surfaced at all. Must be >= top_k (see
+    # the validator below) or the pool would be smaller than what's supposed
+    # to survive it.
+    retrieve_n: int = 20
+    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    @model_validator(mode="after")
+    def _validate_retrieve_n(self) -> "Settings":
+        """retrieve_n must be >= retrieval_top_k.
+
+        A candidate pool smaller than the final top_k can't fill top_k slots
+        -- RAGService.rerank() would silently return fewer chunks than
+        requested instead of the configured amount. Fail loudly at startup
+        instead of letting that surface later as an unexplained drop in
+        context size.
+        """
+        if self.retrieve_n < self.retrieval_top_k:
+            raise ValueError(
+                f"retrieve_n ({self.retrieve_n}) must be >= retrieval_top_k "
+                f"({self.retrieval_top_k}): a smaller candidate pool would "
+                "silently under-return fewer chunks than requested."
+            )
+        return self
 
     @property
     def is_production(self) -> bool:

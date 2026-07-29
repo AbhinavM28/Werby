@@ -14,6 +14,10 @@ __pycache__/
 # Data (vector store is derived state — never commit it)
 data/chroma/
 
+# Source documents for the corpus (large, often third-party/proprietary --
+# e.g. scraped manuals; only the derived eval dataset YAML is versioned)
+docs_corpus/
+
 # IDE / OS
 .vscode/
 .idea/

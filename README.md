@@ -157,9 +157,9 @@ The reranker exists because this harness caught a concrete, reproducible failure
 | Metric | Reranking OFF | Reranking ON |
 |---|---|---|
 | Hit-rate | 96.8% (30/31) | **100.0%** (31/31) |
-| Keyword pass-rate | 90.3% | 90.3% |
+| Keyword pass-rate | 90.3% | 87.1% |
 
-The one miss, every time: `nearmiss-crane-loto-vs-osha-standard` — *"What is the lockout/tagout procedure for the AS/RS stacker crane?"* With reranking off, the correct document is findable but buried at rank 18 of the 20-candidate pool (dense search's top-5 never sees it). The cross-encoder promotes it straight to rank 1. Keyword pass-rate is identical on both sides — reranking's effect here is purely on *which document wins*, not on answer quality once it does.
+The one miss, every time: `nearmiss-crane-loto-vs-osha-standard` — *"What is the lockout/tagout procedure for the AS/RS stacker crane?"* With reranking off, the correct document is findable but buried at rank 18 of the 20-candidate pool (dense search's top-5 never sees it). The cross-encoder promotes it straight to rank 1. Keyword pass-rate is nearly identical on both sides (the small delta is run-to-run LLM phrasing variance, not a reranking effect — the model isn't perfectly deterministic even at low temperature) — reranking's effect here is purely on *which document wins*, not on answer quality once it does.
 
 ```bash
 python -m scripts.evaluate data/eval/dataset.yaml --skip-judge                       # reranking off (default)
@@ -167,6 +167,30 @@ RERANK_ENABLED=true python -m scripts.evaluate data/eval/dataset.yaml --skip-jud
 ```
 
 Reported honestly, not oversold: 37 questions across six documents is enough to validate the harness and the reranker's real effect, and it's already caught two live issues before they'd have been embarrassing anywhere else — an LLM-judge that contradicted its own verdict, and a keyword check too brittle to tell a correct, reworded answer from a wrong one. It still isn't a large-scale statistical benchmark. Growing the dataset further as more documentation gets ingested is on the [roadmap](#roadmap).
+
+### Cloud vs. Local (Air-Gapped) Operation
+
+"Cloud or fully local" is a `.env` choice, not a code change (see [Pluggable AI providers](#key-design-decisions)). Both runs below used the identical dataset, corpus, and `RERANK_ENABLED=true` — only `LLM_PROVIDER`/`EMBEDDING_PROVIDER` and the target Chroma collection differ.
+
+| Metric | Cloud (OpenAI: gpt-4o-mini + text-embedding-3-small) | Local (Ollama: llama3.2:3b + nomic-embed-text) |
+|---|---|---|
+| Hit-rate | 100.0% (31/31) | 100.0% (31/31) |
+| Keyword pass-rate | 87.1% | 87.1% |
+| Faithfulness pass-rate | **91.9%** | 27.0% |
+| Avg. answer latency | **1.85s** (median 1.77s) | 28.2s (median 27.8s) |
+
+Retrieval quality is identical between the two — `nomic-embed-text` finds the right document just as reliably as OpenAI's embeddings on this corpus. What doesn't transfer is faithfulness and speed. `llama3.2:3b` is used as *both* the answer generator and the LLM-judge in local mode, and a 3B model is a weak, inconsistent judge of its own output — 6 inconsistent verdicts against 2 for cloud, the same self-contradiction pattern the `INCONSISTENT` verdict exists to catch, just happening far more often at this model size. CPU-bound local generation also runs roughly 15× slower per query. Score distributions shift too: local mode's gap between in-scope and out-of-scope scores is smaller (0.12 vs. 0.23 for cloud, from the same [reranking table](#reranking-measured-not-assumed) metric above) — `relevance_threshold` is tuned against cloud-scale scores today and would need separate calibration before trusting it in local mode.
+
+None of this is a defect in local mode — it's the honestly-measured cost of the tradeoff it exists for: **complete data privacy and zero external dependencies** for proprietary or export-controlled documentation, in exchange for a smaller model's answer quality and CPU-bound latency. This benchmark ran a 3B chat model specifically; `app/core/config.py`'s own default (`OLLAMA_CHAT_MODEL=llama3.1:8b`) is larger and would likely narrow the faithfulness and latency gap at the cost of memory and generation speed — not yet benchmarked.
+
+**Operational note:** local mode needs a one-time *online* setup — pulling the Ollama models (`ollama pull llama3.2:3b`, `ollama pull nomic-embed-text`) and downloading the sentence-transformers cross-encoder for reranking (cached after first load) — after which it runs with zero network access. This benchmark ran fully offline that way, with Ollama's server started as `CUDA_VISIBLE_DEVICES="" ollama serve` (CPU-only inference — GPU acceleration would change the latency numbers above materially).
+
+```bash
+# cloud
+LLM_PROVIDER=openai EMBEDDING_PROVIDER=openai python -m scripts.evaluate data/eval/dataset.yaml
+# local, fully offline after the one-time model download
+LLM_PROVIDER=ollama EMBEDDING_PROVIDER=ollama python -m scripts.evaluate data/eval/dataset.yaml
+```
 
 ## Configuration
 

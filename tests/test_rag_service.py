@@ -10,8 +10,13 @@ import pytest
 
 from app.core.exceptions import EmptyCorpusError
 from app.services.document_processor import DocumentChunk
+from app.services.lexical_index import LexicalIndex
 from app.services.providers.base import Reranker
-from app.services.rag_service import NO_RELEVANT_CONTEXT_MESSAGE, RAGService
+from app.services.rag_service import (
+    NO_RELEVANT_CONTEXT_MESSAGE,
+    RAGService,
+    reciprocal_rank_fusion,
+)
 from app.services.vector_store import RetrievedChunk, VectorStore
 
 
@@ -34,6 +39,17 @@ class FakeVectorStore(VectorStore):
     def delete_document(self, source_document: str) -> int:
         return 0
 
+    def get_all_chunks(self) -> list[DocumentChunk]:
+        return [
+            DocumentChunk(
+                chunk_id=f"{c.source_document}::chunk_{c.chunk_index}",
+                text=c.text,
+                source_document=c.source_document,
+                chunk_index=c.chunk_index,
+            )
+            for c in self._chunks
+        ]
+
 
 class FakeReranker(Reranker):
     """Predictable, deterministic rule (reverse order) -- never loads a
@@ -48,6 +64,20 @@ class FakeReranker(Reranker):
     ) -> list[RetrievedChunk]:
         self.calls.append((query, len(candidates), top_k))
         return list(reversed(candidates))[:top_k]
+
+
+class FakeLexicalIndex(LexicalIndex):
+    """Predictable, canned results -- never loads real rank-bm25. Records
+    each call's (query, top_k) so tests can assert what hybrid_retrieve()
+    actually asked for."""
+
+    def __init__(self, results: list[RetrievedChunk]) -> None:
+        self._results = results
+        self.calls: list[tuple[str, int]] = []
+
+    def search(self, query_text: str, top_k: int) -> list[RetrievedChunk]:
+        self.calls.append((query_text, top_k))
+        return self._results[:top_k]
 
 
 @pytest.fixture
@@ -193,3 +223,87 @@ def test_rerank_widens_pool_then_narrows_to_top_k(embeddings, llm) -> None:
     # and the final output is narrowed to top_k.
     assert len(result.sources) == 3
     llm.generate_answer.assert_called_once()
+
+
+def test_reciprocal_rank_fusion_merges_by_rank_not_score() -> None:
+    dense = [
+        RetrievedChunk("dense top", "a.pdf", 0, 0.9),
+        RetrievedChunk("dense second", "b.pdf", 0, 0.8),
+    ]
+    lexical = [
+        RetrievedChunk("lexical top", "c.pdf", 0, 15.2),  # unbounded BM25 score
+        RetrievedChunk("dense top again", "a.pdf", 0, 15.0),  # same chunk as dense's #1
+    ]
+
+    fused = reciprocal_rank_fusion(dense, lexical, k=60)
+
+    keys = [(c.source_document, c.chunk_index) for c in fused]
+    # a.pdf/0 was ranked in both lists -- highest combined RRF score, first.
+    assert keys[0] == ("a.pdf", 0)
+    # every unique chunk survives fusion; none silently dropped.
+    assert set(keys) == {("a.pdf", 0), ("b.pdf", 0), ("c.pdf", 0)}
+
+    by_key = {(c.source_document, c.chunk_index): c for c in fused}
+    # Found by both sources -- keeps dense's real cosine score, still
+    # subject to the relevance threshold.
+    assert by_key[("a.pdf", 0)].score == 0.9
+    assert by_key[("a.pdf", 0)].bypass_relevance_filter is False
+    # Lexical-only -- raw BM25 score preserved as-is (not on the cosine
+    # scale), and exempted from the relevance threshold.
+    assert by_key[("c.pdf", 0)].score == 15.2
+    assert by_key[("c.pdf", 0)].bypass_relevance_filter is True
+
+
+def test_hybrid_disabled_leaves_retrieve_output_unchanged(embeddings, llm) -> None:
+    """lexical_index=None (the default) must be a true no-op: hybrid_retrieve()
+    must return exactly what retrieve() returns, proving dense-only behavior
+    is unaffected until hybrid retrieval is explicitly enabled."""
+    chunks = [
+        RetrievedChunk("a", "doc.pdf", 0, 0.9),
+        RetrievedChunk("b", "doc.pdf", 1, 0.8),
+    ]
+    store = FakeVectorStore(chunks)
+    service = RAGService(embeddings, store, llm, default_top_k=2)
+
+    dense_only = service.retrieve("q")
+    hybrid = service.hybrid_retrieve("q")
+
+    assert hybrid == dense_only
+
+
+def test_hybrid_retrieve_fuses_lexical_hits_then_rerank_still_works(
+    embeddings, llm
+) -> None:
+    """The full combined pipeline: a chunk dense search never surfaced at
+    all, but BM25 did, must reach the reranker's candidate pool -- and the
+    rest of query() (widening, reranking, truncation to top_k) still works
+    exactly as it did before hybrid retrieval existed."""
+    dense_chunks = [
+        RetrievedChunk(f"dense {i}", "dense.pdf", i, 0.9 - i * 0.05) for i in range(3)
+    ]
+    store = FakeVectorStore(dense_chunks)
+    lexical_index = FakeLexicalIndex(
+        [RetrievedChunk("exact identifier match", "lexical.pdf", 0, 12.0)]
+    )
+    reranker = FakeReranker()
+    service = RAGService(
+        embeddings, store, llm,
+        default_top_k=2, retrieve_n=3,
+        lexical_index=lexical_index, reranker=reranker,
+    )
+
+    result = service.query("q")
+
+    # Lexical search was asked for the same wide pool size as dense search.
+    assert lexical_index.calls == [("q", 3)]
+    # hybrid_retrieve(top_k=N) returns at most N fused candidates, mirroring
+    # retrieve()'s own contract -- the reranker's pool size still matches
+    # retrieve_n exactly as before hybrid retrieval existed; what changes is
+    # which candidates fill it.
+    assert reranker.calls[0][1] == 3
+    # The lexical-only chunk -- dense search never found it at all -- was
+    # promoted into that pool by fusion and survived through to the final
+    # result. This is the concrete value hybrid retrieval adds.
+    assert "lexical.pdf" in [c.source_document for c in result.sources]
+    # Reranker still narrows to the configured top_k.
+    assert len(result.sources) == 2

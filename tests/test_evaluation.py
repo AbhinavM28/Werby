@@ -57,6 +57,18 @@ class ScriptedVectorStore(VectorStore):
     def delete_document(self, source_document: str) -> int:
         return 0
 
+    def get_all_chunks(self) -> list[DocumentChunk]:
+        return [
+            DocumentChunk(
+                chunk_id=f"{c.source_document}::chunk_{c.chunk_index}",
+                text=c.text,
+                source_document=c.source_document,
+                chunk_index=c.chunk_index,
+            )
+            for chunks in self._script.values()
+            for c in chunks
+        ]
+
 
 class FakeJudge(FaithfulnessJudge):
     """Hand-rolled fake -- proves FaithfulnessJudge is a sufficient interface."""

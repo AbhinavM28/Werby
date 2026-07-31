@@ -13,9 +13,15 @@ Three metrics, three different costs:
   correct source is expected) from out-of-scope ones (where none is), because
   the *gap* between those two populations -- not either number alone -- is
   what a future relevance threshold would sit between. Hit-rate is measured
-  twice, pre- and post-rerank (via ``RAGService.retrieve()`` and ``rerank()``
-  independently) -- the gap between *those* two numbers is what a reranker is
-  actually worth, separate from whatever a relevance threshold contributes.
+  at three checkpoints, each via the matching ``RAGService`` method called
+  independently: dense-only (``retrieve()``), hybrid/pre-rerank
+  (``hybrid_retrieve()``), and post-rerank (``rerank()``). The gap between
+  dense-only and pre-rerank is what hybrid (BM25) retrieval is worth; the
+  gap between pre-rerank and the final rate is what reranking is worth --
+  two independent features, two independent measured contributions. Without
+  hybrid retrieval enabled, ``hybrid_retrieve()`` is a no-op pass-through to
+  ``retrieve()``, so dense-only and pre-rerank naturally come out ~equal --
+  expected, not a bug.
 * **Keyword faithfulness** is free and deterministic: a case-insensitive
   substring check against the generated answer. Shallow (lexical, not
   semantic) but has zero cost and zero flakiness, so it always runs when a
@@ -341,8 +347,10 @@ class CaseResult:
     retrieved: list[RetrievedChunk]  # final, post-rerank candidates
     rank: int | None  # post-rerank 1-indexed position of expected_source; None = miss
     top_score: float | None  # post-rerank score of the #1 chunk, if any
-    pre_rerank_rank: int | None  # rank within the wide dense-search pool
+    pre_rerank_rank: int | None  # rank within the wide hybrid_retrieve() pool
     pre_rerank_top_score: float | None  # top score within that wide pool
+    dense_only_rank: int | None  # rank within the pure dense-only pool
+    dense_only_top_score: float | None  # top score within that dense-only pool
     keyword_check: KeywordCheck
     faithfulness: FaithfulnessResult | None  # None if the judge wasn't run
     answer: str | None  # None if no answer needed to be generated
@@ -356,7 +364,7 @@ class CaseResult:
 
     @property
     def pre_rerank_hit(self) -> bool | None:
-        """Same as ``hit``, but measured against the wide pre-rerank pool.
+        """Same as ``hit``, but measured against the wide hybrid_retrieve() pool.
 
         The gap between this and ``hit`` across a whole report is the value
         reranking adds -- see ``EvaluationReport.pre_rerank_hit_rate``.
@@ -364,6 +372,18 @@ class CaseResult:
         if not self.case.in_scope:
             return None
         return self.pre_rerank_rank is not None
+
+    @property
+    def dense_only_hit(self) -> bool | None:
+        """Same as ``hit``, but measured against pure dense search alone.
+
+        The gap between this and ``pre_rerank_hit`` across a whole report is
+        the value hybrid (BM25) retrieval adds -- see
+        ``EvaluationReport.dense_only_hit_rate``.
+        """
+        if not self.case.in_scope:
+            return None
+        return self.dense_only_rank is not None
 
 
 def _mean(values: Iterable[float]) -> float | None:
@@ -413,6 +433,23 @@ class EvaluationReport:
         if not in_scope:
             return None
         hits = sum(1 for r in in_scope if r.pre_rerank_hit)
+        return round(hits / len(in_scope) * 100, 2)
+
+    @property
+    def dense_only_hit_rate(self) -> float | None:
+        """Same as ``hit_rate``, measured against pure dense search alone.
+
+        Without hybrid retrieval configured, ``pre_rerank_hit_rate`` comes
+        out ~equal to this (hybrid_retrieve() is a no-op pass-through to
+        retrieve()). Once hybrid is enabled, the difference between the two
+        rates is hybrid retrieval's measured contribution -- the number this
+        feature exists to produce, mirroring how the pre-rerank/final gap
+        measures reranking's contribution.
+        """
+        in_scope = self.in_scope_results
+        if not in_scope:
+            return None
+        hits = sum(1 for r in in_scope if r.dense_only_hit)
         return round(hits / len(in_scope) * 100, 2)
 
     @property
@@ -539,12 +576,22 @@ class EvaluationService:
         # quality, which is the one thing this harness exists to measure
         # honestly.
         #
-        # Two checkpoints, both from RAGService itself (never reimplemented
-        # here): the wide pre-rerank pool, and what reranking narrows it to.
-        # Without a reranker configured, RAGService.rerank() is a no-op
-        # truncation, so the two will come out ~equal -- that's expected, not
-        # a bug, and is itself useful confirmation that nothing changed.
-        pool = self._rag.retrieve(case.question, top_k=self._retrieve_n)
+        # Three checkpoints, all from RAGService itself (never reimplemented
+        # here): pure dense search, the wide hybrid pre-rerank pool, and
+        # what reranking narrows it to. Without hybrid retrieval configured,
+        # hybrid_retrieve() is a no-op pass-through to retrieve(), so the
+        # first two come out ~equal; without a reranker, rerank() is a no-op
+        # truncation, so the last two come out ~equal too -- expected, not a
+        # bug, and itself useful confirmation that nothing changed.
+        dense_pool = self._rag.retrieve(case.question, top_k=self._retrieve_n)
+        dense_only_rank = (
+            self._rank_of(case.expected_source, dense_pool)
+            if case.expected_source
+            else None
+        )
+        dense_only_top_score = dense_pool[0].score if dense_pool else None
+
+        pool = self._rag.hybrid_retrieve(case.question, top_k=self._retrieve_n)
         pre_rank = (
             self._rank_of(case.expected_source, pool) if case.expected_source else None
         )
@@ -586,6 +633,8 @@ class EvaluationService:
             top_score=top_score,
             pre_rerank_rank=pre_rank,
             pre_rerank_top_score=pre_top_score,
+            dense_only_rank=dense_only_rank,
+            dense_only_top_score=dense_only_top_score,
             keyword_check=keyword_check,
             faithfulness=faithfulness,
             answer=answer,
@@ -667,9 +716,16 @@ def format_report(report: EvaluationReport) -> str:
             )
             rerank_note = f"  [pre-rerank: {pre_label}]"
 
+        hybrid_note = ""
+        if r.case.in_scope and r.dense_only_rank != r.pre_rerank_rank:
+            dense_label = (
+                f"r{r.dense_only_rank}" if r.dense_only_rank is not None else "miss"
+            )
+            hybrid_note = f"  [dense-only: {dense_label}]"
+
         lines.append(
             f"[{status}] {r.case.id:<28} score={score}  "
-            f"keywords={kw}  faithful={faithful}{rerank_note}"
+            f"keywords={kw}  faithful={faithful}{hybrid_note}{rerank_note}"
         )
         lines.append(f"    Q: {r.case.question}")
 
@@ -685,6 +741,15 @@ def format_report(report: EvaluationReport) -> str:
 
     lines.append(f"Hit-rate:                 {fmt_pct(report.hit_rate)}")
     lines.append(f"Pre-rerank hit-rate:      {fmt_pct(report.pre_rerank_hit_rate)}")
+    lines.append(f"Dense-only hit-rate:      {fmt_pct(report.dense_only_hit_rate)}")
+    if (
+        report.pre_rerank_hit_rate is not None
+        and report.dense_only_hit_rate is not None
+    ):
+        hybrid_delta = round(
+            report.pre_rerank_hit_rate - report.dense_only_hit_rate, 2
+        )
+        lines.append(f"Hybrid retrieval delta:   {hybrid_delta:+.1f}%")
     if report.hit_rate is not None and report.pre_rerank_hit_rate is not None:
         delta = round(report.hit_rate - report.pre_rerank_hit_rate, 2)
         lines.append(f"Reranking delta:          {delta:+.1f}%")

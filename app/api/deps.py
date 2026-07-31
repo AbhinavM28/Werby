@@ -26,6 +26,7 @@ from app.services.evaluation import (
     FaithfulnessJudge,
     LLMFaithfulnessJudge,
 )
+from app.services.lexical_index import BM25LexicalIndex, LexicalIndex
 from app.services.llm_service import LLMService
 from app.services.providers.base import EmbeddingProvider, LLMProvider, Reranker
 from app.services.rag_service import IngestionService, RAGService
@@ -129,6 +130,18 @@ def get_reranker() -> Reranker | None:
     return LocalCrossEncoderReranker(model_name=settings.rerank_model)
 
 
+@lru_cache
+def get_lexical_index() -> LexicalIndex | None:
+    """None when hybrid retrieval is off -- deliberately, so nobody pays the
+    BM25-index-build cost who hasn't opted in. Holds a read-only reference
+    to the vector store; see BM25LexicalIndex's docstring for why that's
+    enough to stay in sync without any changes to the write paths."""
+    settings = get_settings()
+    if not settings.hybrid_enabled:
+        return None
+    return BM25LexicalIndex(store=get_vector_store())
+
+
 def get_llm_service() -> LLMService:
     return LLMService(provider=get_llm_provider())
 
@@ -156,6 +169,8 @@ def get_rag_service() -> RAGService:
         relevance_threshold=settings.relevance_threshold,
         reranker=get_reranker(),
         retrieve_n=settings.retrieve_n,
+        lexical_index=get_lexical_index(),
+        rrf_k=settings.rrf_k,
     )
 
 

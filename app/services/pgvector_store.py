@@ -90,11 +90,40 @@ class PgVectorStore(VectorStore):
         # given at all.
         self._pending_stamp: str | None = None
 
+        # Ensure the extension (and the meta table) exist via a bare,
+        # unconfigured connection BEFORE the pool below is created -- not
+        # optional ordering. register_vector (used as the pool's
+        # `configure` callback) needs the `vector` type to already exist to
+        # look up its OID; on a truly fresh database, every pooled
+        # connection's configure step would fail before ever handing out a
+        # connection this __init__ could use to create the extension with
+        # -- a deadlock. Passed every local test anyway, because local
+        # Postgres already had the extension installed from earlier manual
+        # testing; a genuinely fresh database (exactly what CI provides)
+        # deadlocks without this, and did, the first time this ran there.
+        try:
+            with psycopg.connect(dsn, connect_timeout=5) as conn:
+                conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                conn.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {_META_TABLE} (
+                        collection_name TEXT PRIMARY KEY,
+                        embedding_model TEXT NOT NULL,
+                        dimension INTEGER NOT NULL
+                    )
+                    """
+                )
+                conn.commit()
+        except psycopg.Error as exc:
+            raise VectorStoreError(
+                f"Failed to connect to or initialize Postgres/pgvector: {exc}"
+            ) from exc
+
         # ConnectionPool(..., open=True) does NOT connect synchronously --
         # it starts opening in a background thread and returns immediately
         # even if the DSN is unreachable (confirmed live: it never raises
-        # here). The real failure only surfaces on first actual use, below.
-        # Two separate timeouts are needed to fail fast there instead of
+        # here). A real failure only surfaces on first actual use. Two
+        # separate timeouts are needed to fail fast there instead of
         # hanging (confirmed live, the hard way -- neither alone was
         # enough): `timeout` bounds how long a `.connection()` call waits
         # for the pool itself; `connect_timeout` (a libpq/psycopg connection
@@ -113,30 +142,32 @@ class PgVectorStore(VectorStore):
             kwargs={"connect_timeout": 5},
         )
 
-        try:
-            with self._pool.connection() as conn:
-                conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-                conn.execute(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS {_META_TABLE} (
-                        collection_name TEXT PRIMARY KEY,
-                        embedding_model TEXT NOT NULL,
-                        dimension INTEGER NOT NULL
-                    )
-                    """
-                )
-        except psycopg.Error as exc:
-            raise VectorStoreError(
-                f"Failed to connect to or initialize Postgres/pgvector: {exc}"
-            ) from exc
-
         if embedding_model is not None:
-            self._enforce_embedding_compatibility(embedding_model)
+            # A constructor that fails partway through shouldn't leave the
+            # pool it already opened dangling for garbage collection to
+            # sort out inconsistently (see close()'s docstring for the
+            # warning that causes) -- close it before propagating.
+            try:
+                self._enforce_embedding_compatibility(embedding_model)
+            except Exception:
+                self._pool.close()
+                raise
 
         logger.info(
             "pgvector collection '%s' ready (table %s)",
             collection_name, self._table,
         )
+
+    def close(self) -> None:
+        """Close the connection pool's background worker threads.
+
+        Not part of the VectorStore ABC (Chroma's persistent client needs
+        no equivalent) -- optional cleanup for callers that construct many
+        short-lived instances, e.g. tests. Without it, an unclosed pool's
+        worker threads can raise a benign but noisy "cannot join current
+        thread" warning during interpreter/garbage-collection teardown.
+        """
+        self._pool.close()
 
     def _enforce_embedding_compatibility(self, embedding_model: str) -> None:
         """Refuse to operate on a collection built with a different embedder.

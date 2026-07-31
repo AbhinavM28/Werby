@@ -24,6 +24,7 @@ that existing extra rather than adding a new one.
 """
 
 import logging
+from dataclasses import replace
 
 from app.core.exceptions import ConfigurationError
 from app.services.providers.base import Reranker
@@ -68,5 +69,11 @@ class LocalCrossEncoderReranker(Reranker):
             reverse=True,
         )
         # Original bi-encoder .score is left untouched -- only order changes.
-        # See rag_service.py's rerank() docstring for why.
-        return [chunk for chunk, _ in ranked[:top_k]]
+        # See rag_service.py's rerank() docstring for why. The cross-encoder's
+        # own score is attached separately as rerank_score, unbounded model
+        # logits rather than the [0, 1] cosine scale -- see that field's
+        # docstring on RetrievedChunk for what it's used for.
+        return [
+            replace(chunk, rerank_score=float(score))
+            for chunk, score in ranked[:top_k]
+        ]

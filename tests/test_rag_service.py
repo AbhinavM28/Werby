@@ -4,6 +4,7 @@ A hand-rolled fake (rather than MagicMock everywhere) keeps tests readable
 and verifies the VectorStore *interface* is actually sufficient.
 """
 
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -78,6 +79,24 @@ class FakeLexicalIndex(LexicalIndex):
     def search(self, query_text: str, top_k: int) -> list[RetrievedChunk]:
         self.calls.append((query_text, top_k))
         return self._results[:top_k]
+
+
+class ScoringFakeReranker(Reranker):
+    """Attaches a caller-provided rerank_score per source_document, mimicking
+    LocalCrossEncoderReranker's real behavior (attaching the cross-encoder's
+    own per-pair score) instead of discarding it after sorting."""
+
+    def __init__(self, scores_by_doc: dict[str, float]) -> None:
+        self._scores_by_doc = scores_by_doc
+
+    def rerank(
+        self, query: str, candidates: list[RetrievedChunk], top_k: int
+    ) -> list[RetrievedChunk]:
+        scored = [
+            replace(c, rerank_score=self._scores_by_doc.get(c.source_document, 0.0))
+            for c in candidates
+        ]
+        return scored[:top_k]
 
 
 @pytest.fixture
@@ -307,3 +326,75 @@ def test_hybrid_retrieve_fuses_lexical_hits_then_rerank_still_works(
     assert "lexical.pdf" in [c.source_document for c in result.sources]
     # Reranker still narrows to the configured top_k.
     assert len(result.sources) == 2
+
+
+def test_low_rerank_score_excludes_bypass_chunk_despite_the_flag(
+    embeddings, llm
+) -> None:
+    """The fix for the scaffolding-style false positive a raw BM25 floor
+    can't catch: a lexical-only (bypass_relevance_filter=True) chunk with a
+    low cross-encoder rerank_score must NOT survive filtering, even though
+    the flag alone used to let it through unconditionally.
+
+    .score is set to 7.3, a realistic raw BM25 magnitude (unbounded, easily
+    >> a [0, 1] cosine threshold) rather than a small placeholder -- a real
+    bug this exact test caught: an earlier version of _filter_by_relevance
+    fell through to comparing this raw BM25 value against
+    relevance_threshold (0.35) once the rerank_score check correctly
+    rejected the chunk, and 7.3 >= 0.35 let it back in anyway. A small
+    placeholder score like 0.1 would have passed either implementation,
+    hiding exactly the bug that mattered."""
+    bypass_chunk = replace(
+        RetrievedChunk("coincidental match", "unrelated.pdf", 0, 7.3),
+        bypass_relevance_filter=True,
+    )
+    store = FakeVectorStore([bypass_chunk])
+    reranker = ScoringFakeReranker({"unrelated.pdf": -11.0})  # well below threshold
+    service = RAGService(
+        embeddings, store, llm, reranker=reranker, rerank_relevance_threshold=-5.0
+    )
+
+    result = service.query("q")
+
+    assert result.sufficient_context is False
+    assert result.sources == []
+
+
+def test_high_rerank_score_still_allows_bypass_chunk(embeddings, llm) -> None:
+    """A lexical-only chunk the cross-encoder genuinely judges relevant
+    still survives -- the gate strengthens the bypass, it doesn't disable
+    it."""
+    bypass_chunk = replace(
+        RetrievedChunk("genuine identifier match", "pump.pdf", 0, 5.27),
+        bypass_relevance_filter=True,
+    )
+    store = FakeVectorStore([bypass_chunk])
+    reranker = ScoringFakeReranker({"pump.pdf": 2.0})  # well above threshold
+    service = RAGService(
+        embeddings, store, llm, reranker=reranker, rerank_relevance_threshold=-5.0
+    )
+
+    result = service.query("q")
+
+    assert result.sufficient_context is True
+    assert result.sources[0].source_document == "pump.pdf"
+
+
+def test_bypass_chunk_without_reranker_falls_back_to_unconditional(
+    embeddings, llm
+) -> None:
+    """No reranker configured -- rerank_score stays None, and a
+    bypass_relevance_filter chunk falls back to the original unconditional
+    pass, exactly matching pre-existing behavior. Regression-proofs the
+    "only strengthens the gate when RERANK_ENABLED=true" scope note."""
+    bypass_chunk = replace(
+        RetrievedChunk("lexical-only match", "doc.pdf", 0, 8.0),
+        bypass_relevance_filter=True,
+    )
+    store = FakeVectorStore([bypass_chunk])
+    service = RAGService(embeddings, store, llm)  # no reranker
+
+    result = service.query("q")
+
+    assert result.sufficient_context is True
+    assert result.sources[0].source_document == "doc.pdf"

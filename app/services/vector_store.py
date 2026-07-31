@@ -39,12 +39,25 @@ class RetrievedChunk:
     # `score` above is a raw BM25 score, not a cosine similarity, and isn't
     # comparable to `relevance_threshold`. An exact term match on a
     # distinctive identifier is a strong relevance signal in its own right,
-    # so RAGService._filter_by_relevance() skips the threshold check for
-    # these rather than gatekeeping them behind a cutoff calibrated for a
-    # different scale entirely; the reranker (when configured) remains the
-    # real downstream relevance gate. See reciprocal_rank_fusion() in
-    # rag_service.py for where this gets set.
+    # so RAGService._filter_by_relevance() skips the cosine threshold check
+    # for these rather than gatekeeping them behind a cutoff calibrated for
+    # a different scale entirely -- but only unconditionally when no
+    # `rerank_score` is available (see below) to make a better-informed call
+    # instead. See reciprocal_rank_fusion() in rag_service.py for where this
+    # gets set.
     bypass_relevance_filter: bool = False
+    # The cross-encoder reranker's own (query, chunk) relevance score, when
+    # a reranker is configured and this chunk survived reranking -- None
+    # otherwise. Unbounded, model-specific logits, not the [0, 1] cosine
+    # scale either (see LocalCrossEncoderReranker for the model in use).
+    # Exists specifically so `bypass_relevance_filter` chunks get a real,
+    # semantic relevance check instead of an unconditional pass: BM25's own
+    # score can't distinguish "shares a rare word because it's genuinely the
+    # same topic" from "shares a rare word by pure coincidence" (a
+    # statistical, not semantic, limitation -- see BM25LexicalIndex.search()'s
+    # docstring), but a cross-encoder that reads the query and chunk jointly
+    # can. See RAGService._filter_by_relevance() for how this gets used.
+    rerank_score: float | None = None
 
 
 class VectorStore(ABC):

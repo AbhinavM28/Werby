@@ -139,7 +139,9 @@ def get_lexical_index() -> LexicalIndex | None:
     settings = get_settings()
     if not settings.hybrid_enabled:
         return None
-    return BM25LexicalIndex(store=get_vector_store())
+    return BM25LexicalIndex(
+        store=get_vector_store(), min_score=settings.bm25_min_score
+    )
 
 
 def get_llm_service() -> LLMService:

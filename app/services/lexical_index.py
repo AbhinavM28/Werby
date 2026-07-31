@@ -34,6 +34,12 @@ treats itself as a derived cache: it remembers the chunk count it was last
 built from and rebuilds from ``VectorStore.get_all_chunks()`` whenever that
 count has changed. This means ingestion and deletion need no awareness that
 a lexical index exists at all.
+
+Two false-positive-reduction measures, both added after real measurement
+caught real failures (see ``search()``'s and ``min_score``'s docstrings):
+stopword filtering, and a minimum-score floor. Neither is a complete fix --
+see the module-level note in ``search()`` for the known remaining gap and
+why closing it further isn't a tunable-parameter problem.
 """
 
 import logging
@@ -48,16 +54,37 @@ logger = logging.getLogger(__name__)
 
 _TOKEN_PATTERN = re.compile(r"\w+")
 
+# Common English function words, excluded from BM25 scoring entirely. Without
+# this, a query and a chunk that share nothing but "how", "do", "i", "a" can
+# out-score a genuine identifier match -- measured for real: "How do I set up
+# a VPN on my home router?" scored *higher* against an unrelated OSHA chunk
+# (10.67, driven entirely by those four function words) than "What is
+# V6001176?" scored against the chunk that actually answers it (7.27).
+# Filtering stopwords isn't optional polish here; it's the majority fix for a
+# real, measured false-positive class.
+_STOPWORDS: frozenset[str] = frozenset(
+    "a an the is are was were be been being do does did how what why when "
+    "where who which this that these those i you he she it we they my your "
+    "his her its our their am will would shall should can could may might "
+    "must not no nor so if then than of for to in on at by with from as and "
+    "or but up down out about into over under again further here there all "
+    "any both each few more most other some such only own same".split()
+)
+
 
 def _tokenize(text: str) -> list[str]:
-    """Lowercase, alphanumeric-run tokenizer.
+    """Lowercase, alphanumeric-run tokenizer with stopwords removed.
 
-    Deliberately naive -- no stemming or lemmatization. BM25 is being used
-    here specifically to catch *exact* identifier matches ("1910.147",
-    "SRM-4000") that dense search underrates; aggressive normalization would
-    work against that goal by conflating tokens BM25 should keep distinct.
+    Deliberately naive otherwise -- no stemming or lemmatization. BM25 is
+    being used here specifically to catch *exact* identifier matches
+    ("1910.147", "SRM-4000") that dense search underrates; aggressive
+    normalization would work against that goal by conflating tokens BM25
+    should keep distinct. Stopword removal is different in kind: those
+    tokens carry no discriminating signal at all (see ``_STOPWORDS``), so
+    dropping them only removes noise, never a real signal.
     """
-    return _TOKEN_PATTERN.findall(text.lower())
+    tokens = _TOKEN_PATTERN.findall(text.lower())
+    return [t for t in tokens if t not in _STOPWORDS]
 
 
 class LexicalIndex(ABC):
@@ -79,8 +106,24 @@ class BM25LexicalIndex(LexicalIndex):
     at query time, whether it needs to rebuild.
     """
 
-    def __init__(self, store: VectorStore) -> None:
+    def __init__(self, store: VectorStore, min_score: float = 0.0) -> None:
+        """
+        Args:
+            store: Read-only source of the corpus to index.
+            min_score: Chunks scoring at or below this are excluded from
+                results entirely (see ``search()``'s docstring for why a
+                bare "score > 0" isn't enough). Deliberately defaults to 0.0
+                (today's original, purely-nonzero behavior) rather than a
+                "safe" nonzero value -- the right floor is corpus-specific
+                (BM25 scores scale with corpus size and content via IDF), so
+                a hardcoded default here would be meaningless for a corpus
+                other than the one it was calibrated against. Production
+                wiring passes the calibrated value from
+                ``Settings.bm25_min_score`` explicitly; see that field's
+                comment for the real measurement behind the number.
+        """
         self._store = store
+        self._min_score = min_score
         self._bm25: BM25Okapi | None = None
         # (source_document, chunk_index, text) per chunk
         self._chunks: list[tuple[str, int, str]] = []
@@ -122,14 +165,27 @@ class BM25LexicalIndex(LexicalIndex):
 
         scores = self._bm25.get_scores(_tokenize(query_text))
         ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
-        # A score of exactly 0 means literally no term overlap with the
-        # query at all -- BM25Okapi still returns a number for every
-        # document, so without this filter a totally unrelated query would
-        # "match" whichever chunks happen to sort first among a sea of
-        # zeros. Those chunks would then bypass the relevance threshold
-        # entirely as lexical-only hits (see reciprocal_rank_fusion()),
-        # which is exactly the wrong behavior this filter prevents.
-        matched = [i for i in ranked if scores[i] > 0][:top_k]
+        # min_score defaults to 0 (exclude only exact-zero, no-overlap-at-all
+        # matches -- BM25Okapi returns a number for every chunk, including
+        # ones sharing nothing with the query). Production wiring raises
+        # this to a calibrated floor (Settings.bm25_min_score) that also
+        # excludes *weak* positive-overlap matches, not just zero ones --
+        # chunks that would otherwise bypass relevance_threshold entirely as
+        # lexical-only hits (see reciprocal_rank_fusion()) on the strength of
+        # a coincidental match.
+        #
+        # Known, accepted gap: no score floor can fully close this. Real
+        # measurement found a query about scaffolding fall-protection height
+        # scoring *higher* (8.58) against an unrelated fire-extinguisher
+        # clause than "What is V6001176?" scores (5.27) against the chunk
+        # that actually answers it -- because both share one token with
+        # identical corpus-wide rarity ("requirement", singular, appears in
+        # exactly 1 of 185 chunks -- same document frequency as "v6001176").
+        # BM25 has no way to distinguish "rare word reflecting genuine
+        # relevance" from "rare word shared by coincidence"; that's a
+        # semantic judgment, not a statistical one. A floor catches the
+        # clear-cut cases (weak or zero overlap) but not this one.
+        matched = [i for i in ranked if scores[i] > self._min_score][:top_k]
         return [
             RetrievedChunk(
                 text=self._chunks[i][2],

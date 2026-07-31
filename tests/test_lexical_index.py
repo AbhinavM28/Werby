@@ -105,3 +105,43 @@ def test_bm25_rebuilds_when_store_count_changes() -> None:
 
     results = index.search("hydraulic pressure", top_k=1)
     assert results[0].source_document == "hydraulic.pdf"
+
+
+def test_bm25_pure_stopword_query_returns_no_matches() -> None:
+    """A query with no discriminating tokens at all (see _STOPWORDS) must
+    not match anything -- function words alone carry no signal, and every
+    chunk in the corpus contains some of them."""
+    index = BM25LexicalIndex(store=FakeChunkStore(list(CHUNKS)))
+    results = index.search("What is this and that?", top_k=3)
+    assert results == []
+
+
+def test_bm25_filters_matches_at_or_below_min_score() -> None:
+    """A calibrated min_score excludes weak-but-nonzero matches -- the fix
+    for a real measured problem (see min_score's docstring on
+    BM25LexicalIndex.__init__): a permissive index finds a weak, single-
+    token match; a floor at or above that match's own score excludes it.
+    Self-referential on purpose -- doesn't assume exact BM25 magnitudes."""
+    store = FakeChunkStore(list(CHUNKS))
+    permissive = BM25LexicalIndex(store=store)
+    weak_query = "equipment"  # a single, weakly-discriminating token
+    baseline = permissive.search(weak_query, top_k=3)
+    assert baseline  # sanity: the permissive index does find something
+
+    weak_score = baseline[0].score
+    strict = BM25LexicalIndex(store=store, min_score=weak_score)
+    assert strict.search(weak_query, top_k=3) == []
+
+
+def test_bm25_min_score_still_allows_matches_above_it() -> None:
+    """A floor doesn't exclude everything -- a match genuinely above it
+    still comes through, which is the whole point of a floor rather than
+    disabling lexical-only matches outright."""
+    store = FakeChunkStore(list(CHUNKS))
+    permissive = BM25LexicalIndex(store=store)
+    query = "What is the SRM-4000 rated for?"
+    strong_score = permissive.search(query, top_k=1)[0].score
+
+    index = BM25LexicalIndex(store=store, min_score=strong_score - 0.01)
+    results = index.search(query, top_k=1)
+    assert results[0].source_document == "crane.pdf"

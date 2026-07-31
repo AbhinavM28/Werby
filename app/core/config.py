@@ -112,6 +112,21 @@ class Settings(BaseSettings):
     # paper's value, reused as-is by Elasticsearch/Weaviate/etc. Rarely
     # needs tuning; see reciprocal_rank_fusion()'s docstring for why.
     rrf_k: int = 60
+    # Minimum BM25 score (see BM25LexicalIndex) a chunk must clear to be
+    # returned by lexical search at all -- below this, it's excluded before
+    # it can ever reach reciprocal_rank_fusion() and bypass
+    # relevance_threshold as a lexical-only hit. Provisional, like
+    # relevance_threshold above, and calibrated the same way: measured
+    # real, stopword-filtered scores on this corpus put every tested
+    # deliberately-out-of-scope query at or below 4.84, and every genuine
+    # identifier-lookup query at or above 5.27 -- 5.0 sits in that gap.
+    # Corpus-specific (BM25 scores scale with corpus size/content via IDF)
+    # and NOT a complete fix -- a query that coincidentally shares a
+    # genuinely rare word with an unrelated chunk can still clear this floor
+    # (measured: a scaffolding query scored 8.58 against an unrelated fire
+    # extinguisher clause). See BM25LexicalIndex.search()'s docstring for
+    # why that specific gap isn't closeable by adjusting this number.
+    bm25_min_score: float = 5.0
 
     @model_validator(mode="after")
     def _validate_retrieve_n(self) -> "Settings":

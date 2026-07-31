@@ -39,6 +39,7 @@ werby/
 │   └── services/
 │       ├── document_processor.py   # Text extraction + semantic chunking (pure)
 │       ├── vector_store.py         # VectorStore ABC + ChromaDB implementation
+│       ├── pgvector_store.py       # Postgres + pgvector implementation
 │       ├── llm_service.py          # Prompt engineering + generation
 │       ├── rag_service.py          # Retrieve → rerank → filter → generate orchestration
 │       ├── evaluation.py           # Retrieval hit-rate & faithfulness evaluation harness
@@ -64,7 +65,7 @@ werby/
 
 **Layered architecture.** Routes → services → infrastructure. Routes only translate HTTP; services hold all business logic and know nothing about HTTP; the composition root (`app/api/deps.py`) is the only place concrete implementations are chosen.
 
-**Dependency inversion at the vector store.** Everything depends on the `VectorStore` interface, not ChromaDB. Migrating to pgvector or Qdrant later means writing one new subclass and changing one line of wiring.
+**Dependency inversion at the vector store.** Everything depends on the `VectorStore` interface, not ChromaDB. Proven, not just claimed: `PgVectorStore` (Postgres + pgvector) is a second, real backend, selected via `VECTOR_STORE_BACKEND` — one new subclass and one line of wiring in `app/api/deps.py`, with zero changes anywhere in `RAGService`, `IngestionService`, hybrid retrieval, or reranking. See [Vector Store Backends](#vector-store-backends-chroma-vs-pgvector) for the real, measured proof.
 
 **Domain exceptions, mapped once.** Services raise `WerbyError` subclasses; a single exception handler in `main.py` maps each to the right HTTP status. Business logic stays reusable from the API, the CLI, or a future worker queue.
 
@@ -119,7 +120,8 @@ echo "RERANK_ENABLED=true" >> .env
 ### Docker
 
 ```bash
-docker compose up --build         # API on :8000, Chroma persisted in a volume
+docker compose up --build                      # API on :8000, Chroma persisted in a volume
+docker compose --profile pgvector up postgres  # optional: Postgres + pgvector, for VECTOR_STORE_BACKEND=pgvector
 ```
 
 ## API
@@ -229,6 +231,30 @@ LLM_PROVIDER=openai EMBEDDING_PROVIDER=openai python -m scripts.evaluate data/ev
 LLM_PROVIDER=ollama EMBEDDING_PROVIDER=ollama python -m scripts.evaluate data/eval/dataset.yaml
 ```
 
+### Vector Store Backends: Chroma vs. pgvector
+
+The architecture's central claim (see [Key design decisions](#key-design-decisions)) is that swapping the vector database means one new `VectorStore` subclass and one line of wiring — nothing in `RAGService`, `IngestionService`, hybrid retrieval, or reranking changes. That claim had never actually been tested until `PgVectorStore` (Postgres + the pgvector extension) existed as a second, real implementation to test it against.
+
+Re-running the full 38-case harness against the same corpus, ingested fresh into pgvector with zero code changes — only `VECTOR_STORE_BACKEND=pgvector` and `POSTGRES_DSN` set:
+
+| Metric | Chroma (cloud) | pgvector (cloud) |
+|---|---|---|
+| Hit-rate | 100.0% (32/32) | 100.0% (32/32) |
+| Keyword pass-rate | 90.6% | 87.5% |
+| Score gap (in - out) | 0.2257 | 0.4515 |
+
+Hit-rate is identical — every question that finds its correct document on Chroma finds it on pgvector too, which is the number that actually matters for "did the abstraction hold." One honest difference: `mean_in_scope_score` is meaningfully lower on pgvector (0.63 vs. Chroma's typical ~0.82) even though relative *ranking* is preserved. The two backends don't compute cosine similarity identically in absolute magnitude — pgvector's `<=>` operator and Chroma's own distance metric are each internally consistent but not numerically interchangeable. Practical consequence: `relevance_threshold` is calibrated against Chroma's score distribution today and would need separate, real recalibration before being trusted as-is on pgvector — the same kind of caveat this project already carries for cloud-vs-local embedding models, now extended to vector store backends too.
+
+**Schema note:** pgvector's `vector(n)` column needs a fixed dimension at table-creation time, unlike Chroma's fully lazy schema. Rather than add a settings knob for a number most users don't know off-hand, `PgVectorStore` creates its table lazily on the first real `upsert()` call, sized from the embeddings ingestion is already computing — no wasted "probe" API call just to learn a dimension. The embedding-compatibility guard (same invariant as Chroma's — see that guard's own description above) is stamped at that same point and checked eagerly on every subsequent connection.
+
+**Tested for real, not mocked.** Unlike Chroma (embedded, no server, trivial to unit test), pgvector needs an actual running Postgres — a mock couldn't meaningfully validate real SQL or a real HNSW similarity index. `tests/test_pgvector_store.py` skips gracefully if no Postgres is reachable locally (`docker compose --profile pgvector up postgres` to enable it), so a plain `pytest -q` stays hermetic and green with zero setup either way — but CI always has a real Postgres+pgvector service container (`.github/workflows/ci.yml`), so this backend gets full, non-mocked coverage on every PR regardless of what's running on a given contributor's machine.
+
+```bash
+docker compose --profile pgvector up -d postgres   # local Postgres + pgvector
+VECTOR_STORE_BACKEND=pgvector python -m scripts.ingest docs_corpus
+VECTOR_STORE_BACKEND=pgvector python -m scripts.evaluate data/eval/dataset.yaml --skip-judge
+```
+
 ## Configuration
 
 All settings load from environment variables / `.env` and are validated at startup — see `app/core/config.py` for every knob (models, chunk size, top-k, paths). Secrets never live in code.
@@ -244,7 +270,7 @@ All settings load from environment variables / `.env` and are validated at start
 - [x] Hybrid retrieval (BM25 + dense, fused via Reciprocal Rank Fusion) — off by default; see [Hybrid Retrieval](#hybrid-retrieval-dense--bm25-measured-not-assumed) for its measured effect and a known scoring limitation
 - [x] Recalibrate lexical-only relevance scoring — stopword filtering + a calibrated `bm25_min_score` floor, fixing every tested false positive but one; the remaining gap (a coincidental rare-word match) is a semantic-vs-statistical limit of BM25 itself, not a tunable parameter — see [Hybrid Retrieval](#hybrid-retrieval-dense--bm25-measured-not-assumed)
 - [x] Route lexical-only hits through the reranker's own semantic judgment — closes the remaining gap above (measured: an 8.6-point score separation between genuine and coincidental matches); only strengthens the gate when `RERANK_ENABLED=true`, unconditional bypass otherwise — see [Hybrid Retrieval](#hybrid-retrieval-dense--bm25-measured-not-assumed)
-- [ ] pgvector backend behind the existing `VectorStore` interface
+- [x] pgvector backend behind the existing `VectorStore` interface — real, CI-tested (not mocked) second backend proving the abstraction; see [Vector Store Backends](#vector-store-backends-chroma-vs-pgvector)
 - [ ] Conversation memory / multi-turn queries
 - [ ] Auth + multi-tenant corpora
 - [ ] React frontend against the same API

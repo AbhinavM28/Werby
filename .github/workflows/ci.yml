@@ -8,6 +8,29 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Real Postgres + pgvector, not mocked -- test_pgvector_store.py needs
+    # actual SQL and a real vector similarity index to mean anything, the
+    # same reasoning the reranker's live-validation-only tests already
+    # follow for a different reason (needing a real model). Locally these
+    # tests skip gracefully if no Postgres is running (see
+    # tests/test_pgvector_store.py); here, they're always exercised for
+    # real on every PR.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: werby
+          POSTGRES_PASSWORD: werby
+          POSTGRES_DB: werby
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U werby -d werby"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_DSN: postgresql://werby:werby@localhost:5432/werby
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

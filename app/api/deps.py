@@ -108,12 +108,24 @@ def get_llm_provider() -> LLMProvider:
 @lru_cache
 def get_vector_store() -> VectorStore:
     settings = get_settings()
+    # Stamp the collection with the active embedding model so a provider
+    # switch fails loudly instead of silently corrupting retrieval -- see
+    # each backend's _enforce_embedding_compatibility for why.
+    embedding_model = get_embedding_provider().model
+
+    if settings.vector_store_backend == "pgvector":
+        from app.services.pgvector_store import PgVectorStore
+
+        return PgVectorStore(
+            dsn=settings.postgres_dsn,
+            collection_name=settings.chroma_collection,
+            embedding_model=embedding_model,
+        )
+
     return ChromaVectorStore(
         persist_dir=settings.chroma_persist_dir,
         collection_name=settings.chroma_collection,
-        # Stamp the collection with the active embedding model so a provider
-        # switch fails loudly instead of silently corrupting retrieval.
-        embedding_model=get_embedding_provider().model,
+        embedding_model=embedding_model,
     )
 
 

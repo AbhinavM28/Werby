@@ -9,5 +9,30 @@ services:
       - chroma-data:/srv/werby/data/chroma
     restart: unless-stopped
 
+  # Optional: only needed when VECTOR_STORE_BACKEND=pgvector. Not a
+  # dependency of the `api` service above -- Chroma (embedded, no server)
+  # remains the default, so `docker compose up api` alone still works with
+  # no Postgres involved at all. Start this on its own with
+  # `docker compose up postgres` for local pgvector development, or
+  # `docker compose --profile pgvector up` to bring up both together.
+  postgres:
+    image: pgvector/pgvector:pg16
+    profiles: ["pgvector"]
+    environment:
+      POSTGRES_USER: werby
+      POSTGRES_PASSWORD: werby
+      POSTGRES_DB: werby
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgvector-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U werby -d werby"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
 volumes:
   chroma-data:
+  pgvector-data:

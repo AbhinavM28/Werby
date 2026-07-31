@@ -62,9 +62,25 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.1  # low temperature: factual, grounded answers
     llm_max_tokens: int = 1024
 
-    # --- Vector store (ChromaDB) ---
-    chroma_persist_dir: Path = Path("data/chroma")
+    # --- Vector store ---
+    # "chroma" (default): embedded, zero-config, no server to run -- see
+    # app/services/vector_store.py. "pgvector": Postgres + the pgvector
+    # extension, for teams already running Postgres who'd rather not run a
+    # second database just for vectors -- see app/services/pgvector_store.py.
+    # Both implement the same VectorStore interface; nothing in RAGService
+    # or IngestionService knows or cares which one is active.
+    vector_store_backend: Literal["chroma", "pgvector"] = "chroma"
+    chroma_persist_dir: Path = Path("data/chroma")  # only used by the chroma backend
+    # The collection/namespace name -- despite the CHROMA_ prefix (kept for
+    # backward compatibility with every existing .env this project has ever
+    # documented), this is backend-agnostic: pgvector uses it too, as the
+    # `werby_{name}` table name (see PgVectorStore).
     chroma_collection: str = "werby_documents"
+    # Only used when vector_store_backend="pgvector". Matches
+    # docker-compose.yml's `postgres` service defaults (`docker compose
+    # --profile pgvector up postgres`) -- change if pointing at a different
+    # Postgres instance.
+    postgres_dsn: str = "postgresql://werby:werby@localhost:5432/werby"
 
     # --- Ingestion / chunking ---
     chunk_size: int = 1000       # characters per chunk

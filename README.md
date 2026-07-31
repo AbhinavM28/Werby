@@ -146,7 +146,7 @@ make format
 
 Unit tests prove the code behaves correctly against mocks. `EvaluationService` (`app/services/evaluation.py`) measures whether the *system* — real vector store, real LLM — actually retrieves the right thing and answers faithfully, run against a versioned question set (`data/eval/dataset.yaml`): 37 cases (31 in-scope, 6 deliberately out-of-scope) across the six OSHA standards and equipment manuals currently ingested, including cross-document near-misses designed to expose ranking *confusion*, not just outright retrieval failure.
 
-- **Retrieval hit-rate** — does the expected source document appear in the results, measured at two checkpoints: *pre-rerank* (the wide dense-search candidate pool, `retrieve_n`) and *post-rerank* (the final `top_k` that actually reaches the LLM). The gap between the two is reranking's measured contribution, not an estimate.
+- **Retrieval hit-rate** — does the expected source document appear in the results, measured at three checkpoints: *dense-only* (pure embedding search), *pre-rerank* (the wide candidate pool after hybrid fusion, `retrieve_n`), and *post-rerank* (the final `top_k` that actually reaches the LLM). The gap between dense-only and pre-rerank is hybrid retrieval's measured contribution; the gap between pre-rerank and post-rerank is reranking's — two independent features, two independently measured effects, not estimates.
 - **Score distribution** — the top similarity score per question, split between in-scope and deliberately out-of-scope questions. This is what `relevance_threshold` (see [Configuration](#configuration)) is actually tuned against.
 - **Faithfulness** — a free, deterministic keyword check (with OR-group support for questions that have more than one textually-correct answer drawn from different true clauses of the same source), plus an optional LLM-judge that flags answer claims unsupported by the retrieved context. The judge produces two signals (a list of unsupported claims, and a summary `yes`/`no`); when they disagree with each other, that's recorded as its own **inconsistent** outcome instead of being silently resolved one way or the other.
 
@@ -167,6 +167,33 @@ RERANK_ENABLED=true python -m scripts.evaluate data/eval/dataset.yaml --skip-jud
 ```
 
 Reported honestly, not oversold: 37 questions across six documents is enough to validate the harness and the reranker's real effect, and it's already caught two live issues before they'd have been embarrassing anywhere else — an LLM-judge that contradicted its own verdict, and a keyword check too brittle to tell a correct, reworded answer from a wrong one. It still isn't a large-scale statistical benchmark. Growing the dataset further as more documentation gets ingested is on the [roadmap](#roadmap).
+
+### Hybrid Retrieval (Dense + BM25): measured, not assumed
+
+Dense (embedding) search is weak on exact identifiers — a part number or standard number is one token among many in a chunk's vector, easily outweighed by the surrounding prose. BM25 lexical search is the opposite: no notion of paraphrase, but a rare token that matches gets a large weight precisely because it's rare. Hybrid retrieval fuses both result lists by rank (Reciprocal Rank Fusion, not raw score — see `reciprocal_rank_fusion()` in `app/services/rag_service.py` for why the two scores aren't comparable) before reranking. Re-running the same harness with only `HYBRID_ENABLED` changed, in both provider modes:
+
+| Metric | Cloud OFF | Cloud ON | Local OFF | Local ON |
+|---|---|---|---|---|
+| Hit-rate | 100.0% (31/31) | 100.0% (31/31) | 100.0% (31/31) | 100.0% (31/31) |
+| Dense-only hit-rate | 100.0% (31/31) | 100.0% (31/31) | 100.0% (31/31) | 100.0% (31/31) |
+| Keyword pass-rate | 87.1% | 83.9% | 90.3% | 90.3% |
+| Faithfulness pass-rate | 91.9% | 91.9% | 27.0% | 24.3% |
+| Avg. answer latency | 1.77s (median 1.67s) | 1.71s (median 1.59s) | 28.2s¹ (median 27.8s)¹ | 28.6s (median 27.6s) |
+
+¹ Local OFF latency is carried over from the [Cloud vs. Local](#cloud-vs-local-air-gapped-operation) benchmark below (identical corpus, dataset, and settings) rather than re-captured in this run; the Local ON figure confirms it's consistent with fresh measurement.
+
+Reported honestly: on the original 37-question set, hybrid retrieval showed **no hit-rate improvement** in the table above — dense search with reranking already finds every in-scope document, so there was nothing left for BM25 to rescue. That's a ceiling effect specific to *this* table's setup (reranking on, and hit-rate measured at document granularity — see below), not proof hybrid retrieval has no value. Latency overhead is negligible (BM25 search over 185 chunks is a low-millisecond operation, dwarfed by LLM generation either way).
+
+**Isolating hybrid's own contribution.** Document-level hit-rate structurally can't see hybrid's real strength: it counts a "hit" if *any* chunk of the expected document is retrieved, but hybrid's actual mechanism is promoting the *specific* chunk containing a rare token dense search underrates. A new case, `hybrid-pump-product-number-lookup` — the bare query `"What is V6001176?"`, no topical words to lean on — makes this concrete. `V6001176` is Grundfos's catalog number for a specific lubricant, appearing in exactly one of the pump manual's 50+ chunks. With `RERANK_ENABLED=false` (isolating hybrid from reranking's own independent wide-pool rescue) and hybrid off, that chunk never reaches the top 5, and the LLM answers: *"The context provided does not contain any information regarding 'V6001176.'"* Turn hybrid on, same settings: the correct chunk is promoted and the model answers *"V6001176 is the product number for Castrol Optimol Paste White T, 0.5 kg."* Across the full 38-case set at these isolated settings, hit-rate moves **96.9% → 100.0% (31/32 → 32/32)** — a real, reproducible fix, not noise. (Aggregate keyword pass-rate stayed flat at 87.5% either way — this case's fail→pass flip was offset by a different, unrelated case flipping pass→fail from ordinary LLM phrasing variance, the same effect already noted for reranking above; the per-case answer text is the cleaner evidence here, not the aggregate.)
+
+The existing 4-way table above still reflects the original 37-case dataset (measured before this addition); a full re-run against the current 38-case set is tracked as follow-up work.
+
+**Known limitation, not yet fixed:** BM25 scores are unbounded and not on the `[0, 1]` cosine scale, so chunks found *only* by lexical search are exempted from `relevance_threshold` entirely (`RetrievedChunk.bypass_relevance_filter`) rather than compared against a cosine-calibrated bar — see that field's docstring for the reasoning. This run caught the real cost of that choice: two deliberately out-of-scope questions (*"a good recipe for sourdough bread"*, *"symptoms of seasonal allergies"*) picked up a coincidental lexical match and got answered instead of refused, in **both** provider modes, with reported top scores of 4.11 and 4.67 — nonsense on a similarity scale, and a sign the exemption is too permissive as written. Cloud mode's answers stayed faithful anyway (`gpt-4o-mini` recognized the context didn't actually address the question), but the safety net a threshold is supposed to provide was bypassed by construction, not honored. `mean_out_of_scope_score` and `score_gap` are omitted from the table above for exactly this reason — mixing cosine and raw-BM25 units in one average produces a number (a *negative* gap) that looks alarming but isn't a real regression, just an artifact of comparing incompatible scales. Recalibrating this (a minimum BM25-score floor, or normalizing lexical scores before fusion) is tracked on the [roadmap](#roadmap) before hybrid retrieval should be trusted in production alongside ambiguous or adversarial queries.
+
+```bash
+python -m scripts.evaluate data/eval/dataset.yaml                       # hybrid off (default)
+HYBRID_ENABLED=true python -m scripts.evaluate data/eval/dataset.yaml   # hybrid on
+```
 
 ### Cloud vs. Local (Air-Gapped) Operation
 
@@ -200,11 +227,12 @@ All settings load from environment variables / `.env` and are validated at start
 
 - [x] Pluggable LLM/embedding providers — OpenAI, Ollama (fully local / air-gapped), sentence-transformers
 - [x] CI-enforced quality gates — ruff, mypy, and a hermetic pytest suite required on every PR
-- [x] Evaluation harness — retrieval hit-rate (pre/post-rerank), score distribution, keyword + LLM-judge faithfulness (see [Evaluation & Results](#evaluation--results))
+- [x] Evaluation harness — retrieval hit-rate (dense/pre-rerank/post-rerank), score distribution, keyword + LLM-judge faithfulness (see [Evaluation & Results](#evaluation--results))
 - [x] Configurable relevance threshold — refuses to answer, and skips the LLM call, when nothing retrieved clears the bar
 - [x] Cross-encoder reranking stage — retrieve-then-rerank, off by default, its contribution measured by the eval harness rather than assumed
 - [x] Grow the evaluation dataset alongside the ingested corpus — 37 cases across six documents, including cross-document near-misses
-- [ ] Hybrid retrieval (BM25 + dense)
+- [x] Hybrid retrieval (BM25 + dense, fused via Reciprocal Rank Fusion) — off by default; see [Hybrid Retrieval](#hybrid-retrieval-dense--bm25-measured-not-assumed) for its measured effect and a known scoring limitation
+- [ ] Recalibrate lexical-only relevance scoring — normalize BM25 scores (or otherwise replace the current threshold-bypass exemption) before trusting hybrid retrieval against ambiguous or out-of-scope queries
 - [ ] pgvector backend behind the existing `VectorStore` interface
 - [ ] Conversation memory / multi-turn queries
 - [ ] Auth + multi-tenant corpora

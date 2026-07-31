@@ -11,7 +11,7 @@
 #
 # Grown 2026-07-28 for a stress test against a larger, more diverse corpus
 # (added: 1910.147 lockout/tagout, 1910.157 portable fire extinguishers,
-# 1910.212 machine guarding, and a Grundfos SCALA2 pump manual). Three
+# 1910.212 machine guarding, and a Grundfos SCALA2 pump manual). Four
 # sections below, in order:
 #   1. In-scope, deeper -- straightforward questions against the new docs,
 #      testing whether hit-rate holds as the corpus grows.
@@ -19,7 +19,10 @@
 #      training, inspection intervals, leaks) that appear in *multiple*
 #      documents, phrased so retrieval must pick the one correct source
 #      among genuinely similar candidates, not just "a relevant chunk".
-#   3. True out-of-scope -- nothing in the corpus answers these. A mix of
+#   3. Hybrid retrieval / BM25 strength -- exact-identifier lookups
+#      (catalog/part numbers) designed to fail dense search specifically,
+#      not just be "hard". See each case's notes for the verification.
+#   4. True out-of-scope -- nothing in the corpus answers these. A mix of
 #      totally alien topics and one OSHA-flavored-but-not-ingested question,
 #      to see whether topical similarity alone (without real content) moves
 #      the score.
@@ -242,7 +245,44 @@
   notes: "Reverse of the case above -- same 'leak' topic, pump-specific troubleshooting rather than the PIT's out-of-service rule."
 
 # --------------------------------------------------------------------------- #
-# Category 3: true out-of-scope
+# Category 3: hybrid retrieval / BM25 strength
+# --------------------------------------------------------------------------- #
+#
+# Dense search embeds a whole chunk into one vector; a bare catalog number
+# is one token among many and gets diluted by the surrounding prose. BM25
+# has the opposite bias: a rare token that matches gets a large weight
+# *because* it's rare. These cases are deliberately identifier-only queries
+# (no topical words for dense search to lean on) against a real, unique
+# token in the corpus -- verified empirically before being added: with
+# HYBRID_ENABLED unset (dense-only, reranker off, default_top_k=5), the
+# chunk containing the answer is entirely absent from the top 5; with
+# HYBRID_ENABLED=true it's promoted straight into the pool. Document-level
+# hit-rate can't show this (the SCALA2 pump manual has 50+ chunks, and
+# several *other* chunks from it already rank in dense's top 5, so the
+# document itself was never actually "missed") -- keyword pass-rate is
+# what actually moves here, because it depends on which specific chunk
+# reaches the LLM, not just which document.
+
+- id: hybrid-pump-product-number-lookup
+  question: "What is V6001176?"
+  expected_source: "SCALA2 Pump Manual.pdf"
+  expected_keywords: ["Castrol", "Optimol"]
+  notes: >
+    V6001176 is the Grundfos catalog number for "Castrol Optimol Paste
+    White T, 0.5 kg" in the SCALA2 lubricants table (chunk 10) -- appears
+    nowhere else in the corpus. Dense-only top-5 (HYBRID_ENABLED unset,
+    RERANK_ENABLED=false) returns chunks 41, 3, 2, 42, and one OSHA chunk
+    -- chunk 10 is absent entirely, so the answer isn't recoverable from
+    context at all. With hybrid retrieval on, BM25's exact match on the
+    literal token "v6001176" promotes chunk 10 into the pool. Note:
+    RERANK_ENABLED=true (this repo's persistent default) independently
+    rescues this specific case too, since the reranker's wide retrieve_n
+    pool already happens to contain chunk 10 even without hybrid -- so
+    this case is meant to be re-run with RERANK_ENABLED=false to isolate
+    hybrid's own contribution, not the production-config table above.
+
+# --------------------------------------------------------------------------- #
+# Category 4: true out-of-scope
 # --------------------------------------------------------------------------- #
 
 - id: out-of-scope-baseline

@@ -101,6 +101,20 @@ class Settings(BaseSettings):
     # to survive it.
     retrieve_n: int = 20
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    # Minimum cross-encoder score a lexical-only hybrid hit (see
+    # RetrievedChunk.bypass_relevance_filter) must clear to survive
+    # RAGService._filter_by_relevance() -- only applies when a reranker
+    # actually ran; without one, those hits fall back to the unconditional
+    # bypass. Unbounded model logits, not the [0, 1] cosine scale.
+    # Provisional and corpus/model-specific, calibrated the same way as
+    # relevance_threshold and bm25_min_score above: measured real pairs on
+    # this corpus with rerank_model's default put every genuine
+    # identifier-lookup match at or above -2.47, and every coincidental or
+    # irrelevant match at or below -11.07 -- including the scaffolding case
+    # that defeated bm25_min_score alone. -5.0 sits in that ~8.6-point gap,
+    # biased toward not excluding genuine matches since bm25_min_score is
+    # already the first line of defense.
+    rerank_relevance_threshold: float = -5.0
 
     # --- Hybrid retrieval (dense + BM25 lexical, fused) ---
     # Off by default, same reasoning as rerank_enabled: existing dense-only

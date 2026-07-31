@@ -173,6 +173,7 @@ def get_rag_service() -> RAGService:
         retrieve_n=settings.retrieve_n,
         lexical_index=get_lexical_index(),
         rrf_k=settings.rrf_k,
+        rerank_relevance_threshold=settings.rerank_relevance_threshold,
     )
 
 

@@ -82,4 +82,13 @@ class Reranker(ABC):
     def rerank(
         self, query: str, candidates: list[RetrievedChunk], top_k: int
     ) -> list[RetrievedChunk]:
-        """Return candidates reordered by relevance to query, truncated to top_k."""
+        """Return candidates reordered by relevance to query, truncated to top_k.
+
+        Implementations that compute a real per-(query, chunk) relevance
+        score should attach it via ``dataclasses.replace(chunk,
+        rerank_score=...)`` rather than discarding it after sorting -- see
+        ``RetrievedChunk.rerank_score``'s docstring for what it's used for.
+        Not required: a reranker with no meaningful per-pair score can
+        leave it ``None``, which callers must treat as "no reranker
+        judgment available" rather than "reranker found this irrelevant".
+        """

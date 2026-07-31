@@ -146,6 +146,7 @@ class RAGService:
         retrieve_n: int = 20,
         lexical_index: LexicalIndex | None = None,
         rrf_k: int = 60,
+        rerank_relevance_threshold: float = -5.0,
     ) -> None:
         self._embeddings = embeddings
         self._store = store
@@ -157,6 +158,7 @@ class RAGService:
         self._retrieve_n = retrieve_n
         self._lexical_index = lexical_index
         self._rrf_k = rrf_k
+        self._rerank_relevance_threshold = rerank_relevance_threshold
 
     def retrieve(self, question: str, top_k: int | None = None) -> list[RetrievedChunk]:
         """The read path's retrieval step, isolated from generation.
@@ -244,6 +246,14 @@ class RAGService:
         )
         return reranked
 
+    def _bypass_survives(self, chunk: RetrievedChunk) -> bool:
+        """Whether a ``bypass_relevance_filter`` chunk survives filtering.
+        Only ever called for such chunks -- see ``_filter_by_relevance``'s
+        docstring for the two tiers this implements."""
+        if chunk.rerank_score is None:
+            return True
+        return chunk.rerank_score >= self._rerank_relevance_threshold
+
     def _filter_by_relevance(
         self, chunks: list[RetrievedChunk]
     ) -> list[RetrievedChunk]:
@@ -256,15 +266,27 @@ class RAGService:
         inclusive, not exclusive.
 
         Chunks with ``bypass_relevance_filter=True`` (lexical-only hybrid
-        hits -- see that field's docstring on ``RetrievedChunk``) always
-        survive this step regardless of score, since their score is a raw
-        BM25 value, not the cosine similarity this threshold was calibrated
-        against.
+        hits -- see that field's docstring on ``RetrievedChunk``) never fall
+        through to this cosine-scale check at all -- their ``.score`` is a
+        raw BM25 value, and BM25 scores routinely exceed a cosine threshold
+        numerically (e.g. 7.29 vs. 0.35) even when they should be rejected,
+        so comparing it here would silently defeat the dedicated bypass
+        check below. Instead they go through ``_bypass_survives``: when a
+        reranker ran, their cross-encoder ``rerank_score`` (semantic, not
+        statistical, judgment) against ``rerank_relevance_threshold`` --
+        catches coincidental lexical matches BM25's own score can't
+        distinguish from genuine ones (see ``bm25_min_score``'s docstring in
+        ``config.py``). Without a reranker, ``rerank_score`` is None and
+        these fall back to the original unconditional bypass.
         """
         survivors = [
             c
             for c in chunks
-            if c.bypass_relevance_filter or c.score >= self._relevance_threshold
+            if (
+                self._bypass_survives(c)
+                if c.bypass_relevance_filter
+                else c.score >= self._relevance_threshold
+            )
         ]
         if len(survivors) < len(chunks):
             logger.info(

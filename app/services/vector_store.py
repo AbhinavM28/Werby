@@ -34,6 +34,17 @@ class RetrievedChunk:
     source_document: str
     chunk_index: int
     score: float  # similarity in [0, 1]; higher = more relevant
+    # True only for chunks hybrid retrieval's RRF fusion found exclusively
+    # via lexical (BM25) search -- dense search never returned them, so
+    # `score` above is a raw BM25 score, not a cosine similarity, and isn't
+    # comparable to `relevance_threshold`. An exact term match on a
+    # distinctive identifier is a strong relevance signal in its own right,
+    # so RAGService._filter_by_relevance() skips the threshold check for
+    # these rather than gatekeeping them behind a cutoff calibrated for a
+    # different scale entirely; the reranker (when configured) remains the
+    # real downstream relevance gate. See reciprocal_rank_fusion() in
+    # rag_service.py for where this gets set.
+    bypass_relevance_filter: bool = False
 
 
 class VectorStore(ABC):
@@ -62,6 +73,21 @@ class VectorStore(ABC):
     @abstractmethod
     def delete_document(self, source_document: str) -> int:
         """Delete all chunks for a document. Returns number deleted."""
+
+    @abstractmethod
+    def get_all_chunks(self) -> list[DocumentChunk]:
+        """Return every stored chunk, unscored -- there's no query here.
+
+        Exists for consumers that need the raw corpus rather than a
+        similarity match against it, e.g. ``BM25LexicalIndex`` (see
+        ``app/services/lexical_index.py``), which has no persistence of its
+        own and rebuilds itself from this on every staleness check. Returns
+        ``DocumentChunk`` -- the same type ``upsert`` accepts -- so the
+        contract is an obvious round-trip: whatever was put in comes back
+        out. Any real vector database backend supports a full scan/select
+        like this trivially, so it's a reasonable, generic addition to the
+        interface rather than a Chroma-specific leak.
+        """
 
 
 class ChromaVectorStore(VectorStore):
@@ -227,3 +253,34 @@ class ChromaVectorStore(VectorStore):
             return len(ids)
         except Exception as exc:
             raise VectorStoreError(f"Chroma delete failed: {exc}") from exc
+
+    def get_all_chunks(self) -> list[DocumentChunk]:
+        # Loads the full corpus into memory in one call -- fine at Werby's
+        # current scale (a handful of manuals, low thousands of chunks) and
+        # is what BM25LexicalIndex needs anyway, since rank-bm25 itself is
+        # in-memory only. At a scale where this stops being trivial, the
+        # right fix is pushing lexical search into the database layer
+        # (e.g. Postgres full-text search alongside pgvector) rather than
+        # pulling everything through this method.
+        try:
+            data = self._collection.get(include=["documents", "metadatas"])
+        except Exception as exc:
+            raise VectorStoreError(f"Chroma get-all failed: {exc}") from exc
+
+        ids = data.get("ids") or []
+        documents = data.get("documents") or []
+        metadatas = data.get("metadatas") or []
+
+        chunks: list[DocumentChunk] = []
+        for chunk_id, text, meta in zip(ids, documents, metadatas, strict=True):
+            chunks.append(
+                DocumentChunk(
+                    chunk_id=chunk_id,
+                    text=text,
+                    source_document=str(meta.get("source_document", "unknown")),
+                    chunk_index=int(
+                        cast(int | float | str, meta.get("chunk_index", -1))
+                    ),
+                )
+            )
+        return chunks

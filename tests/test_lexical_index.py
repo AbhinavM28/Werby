@@ -1,0 +1,107 @@
+"""Unit tests for BM25LexicalIndex.
+
+rank-bm25 is pure Python, deterministic, and has no model-download cost
+(unlike the reranker's sentence-transformers dependency), so these run
+against the real BM25Okapi -- only the VectorStore it reads from is faked.
+"""
+
+from app.services.document_processor import DocumentChunk
+from app.services.lexical_index import BM25LexicalIndex
+from app.services.vector_store import VectorStore
+
+
+class FakeChunkStore(VectorStore):
+    """Minimal fake: BM25LexicalIndex only ever calls count() and
+    get_all_chunks(), so that's all this needs to implement for real."""
+
+    def __init__(self, chunks: list[DocumentChunk]) -> None:
+        self.chunks = chunks
+
+    def upsert(
+        self, chunks: list[DocumentChunk], embeddings: list[list[float]]
+    ) -> None:
+        raise NotImplementedError
+
+    def search(self, query_embedding: list[float], top_k: int):
+        raise NotImplementedError
+
+    def count(self) -> int:
+        return len(self.chunks)
+
+    def list_documents(self) -> list[str]:
+        raise NotImplementedError
+
+    def delete_document(self, source_document: str) -> int:
+        raise NotImplementedError
+
+    def get_all_chunks(self) -> list[DocumentChunk]:
+        return self.chunks
+
+
+CHUNKS = [
+    DocumentChunk(
+        "crane::chunk_0",
+        "The SRM-4000 hoist has a rated load of 2000 kg.",
+        "crane.pdf",
+        0,
+    ),
+    DocumentChunk(
+        "osha::chunk_0",
+        "General lockout/tagout procedures apply to all powered equipment.",
+        "osha.pdf",
+        0,
+    ),
+    DocumentChunk(
+        "forklift::chunk_0",
+        "Daily inspection intervals are required for all forklifts.",
+        "forklift.pdf",
+        0,
+    ),
+]
+
+
+def test_bm25_ranks_exact_identifier_match_first() -> None:
+    """The scenario this feature exists for: a distinctive, rare identifier
+    that appears in exactly one chunk should be found even by pure term
+    overlap, with no embedding involved at all."""
+    index = BM25LexicalIndex(store=FakeChunkStore(list(CHUNKS)))
+
+    results = index.search("What is the SRM-4000 rated for?", top_k=3)
+
+    assert results[0].source_document == "crane.pdf"
+    assert results[0].chunk_index == 0
+
+
+def test_bm25_search_respects_top_k() -> None:
+    index = BM25LexicalIndex(store=FakeChunkStore(list(CHUNKS)))
+    results = index.search("inspection", top_k=1)
+    assert len(results) == 1
+
+
+def test_bm25_empty_corpus_returns_empty_list() -> None:
+    index = BM25LexicalIndex(store=FakeChunkStore([]))
+    assert index.search("anything", top_k=5) == []
+
+
+def test_bm25_rebuilds_when_store_count_changes() -> None:
+    """The self-checking staleness design: a chunk added to the store after
+    the index's first build must become searchable on the very next
+    search() call, with no explicit invalidation from the caller -- see
+    BM25LexicalIndex._ensure_fresh's docstring for why this is a deliberate
+    trade rather than an oversight."""
+    store = FakeChunkStore(list(CHUNKS))
+    index = BM25LexicalIndex(store=store)
+    first = index.search("hydraulic", top_k=3)
+    assert first == []  # nothing about hydraulics ingested yet
+
+    store.chunks.append(
+        DocumentChunk(
+            "hydraulic::chunk_0",
+            "Hydraulic pressure must not exceed 3000 psi.",
+            "hydraulic.pdf",
+            0,
+        )
+    )
+
+    results = index.search("hydraulic pressure", top_k=1)
+    assert results[0].source_document == "hydraulic.pdf"

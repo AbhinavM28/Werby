@@ -102,6 +102,17 @@ class Settings(BaseSettings):
     retrieve_n: int = 20
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
+    # --- Hybrid retrieval (dense + BM25 lexical, fused) ---
+    # Off by default, same reasoning as rerank_enabled: existing dense-only
+    # behavior is unchanged until explicitly opted in. See
+    # app/services/lexical_index.py and reciprocal_rank_fusion() in
+    # rag_service.py for the full design.
+    hybrid_enabled: bool = False
+    # Reciprocal Rank Fusion damping constant -- 60 is the original RRF
+    # paper's value, reused as-is by Elasticsearch/Weaviate/etc. Rarely
+    # needs tuning; see reciprocal_rank_fusion()'s docstring for why.
+    rrf_k: int = 60
+
     @model_validator(mode="after")
     def _validate_retrieve_n(self) -> "Settings":
         """retrieve_n must be >= retrieval_top_k.

@@ -6,7 +6,15 @@
 
 Ask *"What is the rated load of the AS/RS crane?"* and Werby retrieves the relevant passages from your ingested manuals, feeds them to an LLM under strict grounding rules, and returns the answer **with citations to the exact chunks it used** — because in an industrial setting, a hallucinated torque spec is a safety incident, not a bug.
 
-> **Status:** actively developed, pre-deployment. The RAG pipeline, provider abstraction, reranking stage, CI quality gates, and evaluation harness are complete and tested — see [Evaluation & Results](#evaluation--results) for real measured numbers and [Roadmap](#roadmap) for what's next. A hosted demo and walkthrough recording will follow deployment.
+> **Status:** actively developed and **deployed live** on Azure. The RAG pipeline, provider abstraction, hybrid retrieval, reranking stage, pgvector backend, CI quality gates, and evaluation harness are complete and tested — see [Evaluation & Results](#evaluation--results) for real measured numbers, [Live Demo](#live-demo) to try it, and [Roadmap](#roadmap) for what's next.
+
+## Live Demo
+
+**[Try the live API — interactive Swagger UI](https://werby-app.orangeglacier-eddb16ca.eastus2.azurecontainerapps.io/docs)**
+
+<!-- DEMO VIDEO: embed or link here -->
+
+Running on Azure Container Apps with scale-to-zero enabled (see [Deployment](#deployment)) — if it's been idle, the **first request can take 15-30 seconds** while a new instance cold-starts. Subsequent requests are fast.
 
 ## How RAG works here
 
@@ -123,6 +131,14 @@ echo "RERANK_ENABLED=true" >> .env
 docker compose up --build                      # API on :8000, Chroma persisted in a volume
 docker compose --profile pgvector up postgres  # optional: Postgres + pgvector, for VECTOR_STORE_BACKEND=pgvector
 ```
+
+### Deployment
+
+Werby's live instance (see [Live Demo](#live-demo)) runs on Azure:
+
+- **Compute:** the same Docker image built above, pushed to Azure Container Registry, running on **Azure Container Apps** with scale-to-zero — no cost while idle, at the cost of a cold start on the first request after a quiet period.
+- **Vector store:** `VECTOR_STORE_BACKEND=pgvector`, backed by **Azure Database for PostgreSQL Flexible Server** with the pgvector extension enabled — see [Vector Store Backends](#vector-store-backends-chroma-vs-pgvector) for how that abstraction holds up in practice.
+- **Secrets:** `OPENAI_API_KEY` and the Postgres connection string are Container Apps secrets, injected as environment variables at runtime — never baked into the image, never committed to the repo. `Settings` (pydantic-settings) reads them exactly like a local `.env` file; the deployment platform is invisible to the application code.
 
 ## API
 
@@ -271,10 +287,12 @@ All settings load from environment variables / `.env` and are validated at start
 - [x] Recalibrate lexical-only relevance scoring — stopword filtering + a calibrated `bm25_min_score` floor, fixing every tested false positive but one; the remaining gap (a coincidental rare-word match) is a semantic-vs-statistical limit of BM25 itself, not a tunable parameter — see [Hybrid Retrieval](#hybrid-retrieval-dense--bm25-measured-not-assumed)
 - [x] Route lexical-only hits through the reranker's own semantic judgment — closes the remaining gap above (measured: an 8.6-point score separation between genuine and coincidental matches); only strengthens the gate when `RERANK_ENABLED=true`, unconditional bypass otherwise — see [Hybrid Retrieval](#hybrid-retrieval-dense--bm25-measured-not-assumed)
 - [x] pgvector backend behind the existing `VectorStore` interface — real, CI-tested (not mocked) second backend proving the abstraction; see [Vector Store Backends](#vector-store-backends-chroma-vs-pgvector)
+- [x] Deploy to production — Azure Container Apps + Azure Database for PostgreSQL Flexible Server (pgvector), image in Azure Container Registry, secrets via Container Apps secrets, never in the repo or image; see [Live Demo](#live-demo) and [Deployment](#deployment)
+- [ ] Record and embed a demo video walkthrough — placeholder in [Live Demo](#live-demo)
+- [ ] Deploy the Streamlit chat UI as a second container — bring the existing local chat interface (document upload sidebar, chat panel, source citations) to production as a separate front-end service pointing at the deployed API; needs `allow_origins` opened for the frontend's domain, currently locked to `[]` under `ENVIRONMENT=production` (see [Key design decisions](#key-design-decisions))
 - [ ] Conversation memory / multi-turn queries
 - [ ] Auth + multi-tenant corpora
 - [ ] React frontend against the same API
-- [ ] Deploy and record a live demo
 
 ## License
 

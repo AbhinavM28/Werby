@@ -41,9 +41,12 @@ never sideways or up.
 Key seams (do not collapse these — they are the point of the design):
 
 - **VectorStore** is an abstract base class (`app/services/vector_store.py`).
-  Everything depends on the interface, never on ChromaDB directly. A new
-  backend (pgvector, Qdrant) means one new subclass, not edits across the app.
-- **LLMProvider / EmbeddingProvider** are ABCs (`app/services/providers/`).
+  Everything depends on the interface, never on a concrete database. Proven,
+  not just designed this way: `PgVectorStore` (`app/services/pgvector_store.py`,
+  Postgres + pgvector) is a second real backend — one new subclass and one
+  line of wiring in `deps.py`, zero changes to `RAGService`/`IngestionService`.
+  A future backend (Qdrant, etc.) follows the same path.
+- **LLMProvider / EmbeddingProvider / Reranker** are ABCs (`app/services/providers/`).
   The AI backend (OpenAI vs. local Ollama vs. sentence-transformers) is a
   `.env` choice, not a code change. This enables fully-local, air-gapped
   deployment for proprietary documentation.
@@ -55,8 +58,10 @@ Key seams (do not collapse these — they are the point of the design):
   nowhere else.
 
 Invariant to protect: embeddings from different models occupy incompatible
-vector spaces. The Chroma collection is stamped with its embedding model, and
-the app refuses to start on a mismatch. Never weaken this guard.
+vector spaces. Every `VectorStore` implementation stamps its collection with
+the embedding model that built it (Chroma and `PgVectorStore` both do this
+independently) and refuses to start on a mismatch. Never weaken this guard,
+in either implementation.
 
 ## Conventions
 
@@ -75,6 +80,11 @@ the app refuses to start on a mismatch. Never weaken this guard.
 - **Logging**: `logger = logging.getLogger(__name__)` per module. No `print()`.
 - **Tests must be hermetic**: no network, no real API keys, no dependence on a
   developer's local `.env`. Use mocks/fakes and pytest's `tmp_path`/`monkeypatch`.
+  One deliberate, documented exception: `tests/test_pgvector_store.py` runs
+  against a real Postgres — a mock can't validate real SQL or a real HNSW
+  index. It skips gracefully if none is reachable locally, and always runs
+  for real in CI via a service container (`.github/workflows/ci.yml`). Don't
+  extend this exception to other tests without the same justification.
 
 ## Git & workflow
 
@@ -86,13 +96,17 @@ the app refuses to start on a mismatch. Never weaken this guard.
 - Before proposing a commit, run ALL THREE gates locally and confirm they pass:
   `ruff check app tests scripts`, `mypy app`, and `pytest -q`.
 - Open a PR, self-review the diff in Files Changed, squash-merge, delete branch.
+- Commits are authored solely by me — do not add a `Co-Authored-By` trailer or
+  any AI-attribution line to commit messages in this repo.
 
 ## Environment
 
 - Always work inside the project virtualenv. Activate with
   `source .venv/Scripts/activate` (Windows/Git Bash). The prompt shows `(.venv)`
   when active. `ModuleNotFoundError` almost always means it isn't activated.
-- Install everything with `pip install -e ".[dev]"`.
+- Install everything with `pip install -e ".[dev]"`. Add `,frontend` for the
+  Streamlit UI or `,local` for in-process embeddings/reranking
+  (sentence-transformers) — see `pyproject.toml`'s `[project.optional-dependencies]`.
 - Only `app` is the installable package (see `pyproject.toml`); `frontend`,
   `scripts`, and `data` are intentionally excluded.
 
@@ -106,9 +120,15 @@ the app refuses to start on a mismatch. Never weaken this guard.
 - Bulk ingest: `python -m scripts.ingest ./path/to/docs`
 - Evaluate: `python -m scripts.evaluate data/eval/dataset.yaml` (add `--skip-judge`
   to skip the LLM faithfulness check and its cost)
+- Local Docker (Chroma, the default): `docker compose up --build`
+- Local Postgres+pgvector: `docker compose --profile pgvector up postgres`,
+  then set `VECTOR_STORE_BACKEND=pgvector` in `.env`
 
-## Current roadmap (next up first)
+## Current roadmap
 
-1. Hybrid retrieval (BM25 + dense) and a reranking stage.
-2. pgvector backend behind the existing VectorStore interface.
-3. Conversation memory / multi-turn queries.
+See the README's [Roadmap](README.md#roadmap) for the full, current list —
+not duplicated here to avoid two roadmaps drifting apart (the same class of
+drift that once broke `requirements.txt` vs. `pyproject.toml` in this repo).
+Immediate next items as of this writing: record a demo video, deploy the
+Streamlit UI as a second container, then conversation memory / multi-turn
+queries.

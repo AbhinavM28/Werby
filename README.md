@@ -12,7 +12,7 @@ Ask *"What is the rated load of the AS/RS crane?"* and Werby retrieves the relev
 
 **[Try the live API — interactive Swagger UI](https://werby-app.orangeglacier-eddb16ca.eastus2.azurecontainerapps.io/docs)**
 
-<!-- DEMO VIDEO: embed or link here -->
+[![Werby demo video](https://img.youtube.com/vi/ZaQoRN9tOWM/maxresdefault.jpg)](https://youtu.be/ZaQoRN9tOWM)
 
 Running on Azure Container Apps with scale-to-zero enabled (see [Deployment](#deployment)) — if it's been idle, the **first request can take 15-30 seconds** while a new instance cold-starts. Subsequent requests are fast.
 
@@ -164,6 +164,8 @@ make format
 
 Unit tests prove the code behaves correctly against mocks. `EvaluationService` (`app/services/evaluation.py`) measures whether the *system* — real vector store, real LLM — actually retrieves the right thing and answers faithfully, run against a versioned question set (`data/eval/dataset.yaml`): 38 cases (32 in-scope, 6 deliberately out-of-scope) across the six OSHA standards and equipment manuals currently ingested, including cross-document near-misses designed to expose ranking *confusion* and identifier-only lookups designed to expose dense search's specific blind spot, not just outright retrieval failure.
 
+**Built AI-assisted, held to real standards throughout.** [`CLAUDE.md`](CLAUDE.md) is the actual working agreement enforced at every step of building this — architecture rules, mandatory quality gates before every commit, real-numbers-only evaluation. Every metric below is the evidence it held up in practice, not retrospective description.
+
 - **Retrieval hit-rate** — does the expected source document appear in the results, measured at three checkpoints: *dense-only* (pure embedding search), *pre-rerank* (the wide candidate pool after hybrid fusion, `retrieve_n`), and *post-rerank* (the final `top_k` that actually reaches the LLM). The gap between dense-only and pre-rerank is hybrid retrieval's measured contribution; the gap between pre-rerank and post-rerank is reranking's — two independent features, two independently measured effects, not estimates.
 - **Score distribution** — the top similarity score per question, split between in-scope and deliberately out-of-scope questions. This is what `relevance_threshold` (see [Configuration](#configuration)) is actually tuned against.
 - **Faithfulness** — a free, deterministic keyword check (with OR-group support for questions that have more than one textually-correct answer drawn from different true clauses of the same source), plus an optional LLM-judge that flags answer claims unsupported by the retrieved context. The judge produces two signals (a list of unsupported claims, and a summary `yes`/`no`); when they disagree with each other, that's recorded as its own **inconsistent** outcome instead of being silently resolved one way or the other.
@@ -288,7 +290,7 @@ All settings load from environment variables / `.env` and are validated at start
 - [x] Route lexical-only hits through the reranker's own semantic judgment — closes the remaining gap above (measured: an 8.6-point score separation between genuine and coincidental matches); only strengthens the gate when `RERANK_ENABLED=true`, unconditional bypass otherwise — see [Hybrid Retrieval](#hybrid-retrieval-dense--bm25-measured-not-assumed)
 - [x] pgvector backend behind the existing `VectorStore` interface — real, CI-tested (not mocked) second backend proving the abstraction; see [Vector Store Backends](#vector-store-backends-chroma-vs-pgvector)
 - [x] Deploy to production — Azure Container Apps + Azure Database for PostgreSQL Flexible Server (pgvector), image in Azure Container Registry, secrets via Container Apps secrets, never in the repo or image; see [Live Demo](#live-demo) and [Deployment](#deployment)
-- [ ] Record and embed a demo video walkthrough — placeholder in [Live Demo](#live-demo)
+- [x] Record a demo video walkthrough — linked in [Live Demo](#live-demo)
 - [ ] Deploy the Streamlit chat UI as a second container — bring the existing local chat interface (document upload sidebar, chat panel, source citations) to production as a separate front-end service pointing at the deployed API; needs `allow_origins` opened for the frontend's domain, currently locked to `[]` under `ENVIRONMENT=production` (see [Key design decisions](#key-design-decisions))
 - [ ] Conversation memory / multi-turn queries
 - [ ] Auth + multi-tenant corpora
